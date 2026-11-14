@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+*.pending-snap
+.DS_Store
+# Never commit editor/agent auto-run configs into this repo
+/.vscode/
+/.idea/

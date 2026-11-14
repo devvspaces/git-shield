@@ -1,0 +1,15 @@
+[package]
+name = "shield-report"
+description = "Report rendering for git-shield"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+shield-core = { workspace = true }
+serde_json = { workspace = true }
+owo-colors = { workspace = true }
+
+[lints]
+workspace = true

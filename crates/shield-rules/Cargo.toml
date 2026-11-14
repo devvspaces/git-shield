@@ -1,0 +1,18 @@
+[package]
+name = "shield-rules"
+description = "Built-in detectors for git-shield"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+shield-core = { workspace = true }
+jsonc-parser = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+aho-corasick = { workspace = true }
+infer = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,32 @@
+[package]
+name = "git-shield"
+description = "Inspect incoming git changes for supply-chain attacks before they touch your working tree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["git", "security", "supply-chain", "malware", "scanner"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "git-shield"
+path = "src/main.rs"
+
+[dependencies]
+shield-core = { workspace = true }
+shield-git = { workspace = true }
+shield-rules = { workspace = true }
+shield-report = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+shield-fixtures = { path = "../shield-fixtures" }
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

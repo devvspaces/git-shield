@@ -1,0 +1,13 @@
+[package]
+name = "shield-fixtures"
+description = "Builds hostile-but-harmless git repositories for git-shield tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

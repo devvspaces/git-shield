@@ -1,0 +1,16 @@
+[package]
+name = "shield-core"
+description = "Core types and scan engine for git-shield"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rayon = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[lints]
+workspace = true
