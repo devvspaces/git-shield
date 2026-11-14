@@ -9,7 +9,7 @@
 |---|---|
 | **Phase** | 1: Read-only engine and `scan` / `check` (mostly done) |
 | **Last completed** | Engine, gix delta, T1/T2/T3/T7/T8/T12/path detectors, `scan` + `check`, fixture harness, 33 tests green |
-| **Next task** | Finish Phase 1: `insta` snapshot tests of the terminal report, group repeated T12 findings into one summary finding, CI run green on GitHub. Then Phase 2 (`pull` + T10/T11 + trust store). |
+| **Next task** | Finish Phase 1: `insta` snapshot tests of the terminal report; group repeated T12 findings into one summary finding. Then Phase 2 (`pull` + T10/T11 + trust store). |
 | **Blockers** | None |
 | **Perf** | `scan af20233d8..d9351023d` on matador-legacy (20 commits, 58 file versions): **~40 ms** warm (target < 300 ms) |
 
@@ -33,7 +33,7 @@
 - [x] Verified on the real matador-legacy incident range
 - [ ] `insta` snapshot tests for the terminal output
 - [ ] Group T12 findings (10 files → one summary + per-file details) to reduce noise
-- [ ] Push to GitHub and get CI green
+- [x] Pushed to GitHub; CI green on macOS + Linux (run 43615839044)
 
 ### Phase 2: `git shield pull` gate (v0.1)
 - [ ] `pull` = preflight → fetch → scan → decide → `merge --ff-only` (`--rebase` / `--merge` opt-in)
