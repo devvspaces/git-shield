@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Content of a blob as read from the object database (never the worktree).
@@ -123,4 +124,58 @@ pub struct ScanContext {
     /// Incoming commits, newest first.
     pub commits: Vec<CommitInfo>,
     pub local: Option<LocalRepoState>,
+    /// History facts about the ref being scanned (rewrites, committer habits).
+    pub provenance: Option<Provenance>,
+}
+
+/// Where git-shield learned about a previous tip of the scanned ref.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TipSource {
+    /// Value of the remote-tracking ref just before git-shield fetched.
+    PreFetch,
+    /// An earlier value recorded in the ref's reflog.
+    Reflog,
+    /// The last tip the user pulled through git-shield.
+    TrustStore,
+    /// Passed explicitly (`scan --previous-tip`).
+    Given,
+}
+
+impl TipSource {
+    pub fn describe(self) -> &'static str {
+        match self {
+            TipSource::PreFetch => "fetched before",
+            TipSource::Reflog => "recorded in the reflog",
+            TipSource::TrustStore => "last pulled through git-shield",
+            TipSource::Given => "given with --previous-tip",
+        }
+    }
+}
+
+/// A previous tip of the ref that is not contained in the new tip.
+#[derive(Debug, Clone)]
+pub struct Rewrite {
+    pub old_tip: String,
+    pub source: TipSource,
+    /// Commits reachable from `old_tip` but not from the new tip, newest first (capped).
+    pub lost: Vec<CommitInfo>,
+    /// True if `lost` was cut at the cap.
+    pub lost_truncated: bool,
+}
+
+/// History facts used by the T10/T11 detectors.
+#[derive(Debug, Clone, Default)]
+pub struct Provenance {
+    /// Full ref name, e.g. `refs/remotes/origin/dev`.
+    pub ref_name: String,
+    pub rewrites: Vec<Rewrite>,
+    /// Committer email (lower-cased) → UTC offset (seconds) → number of commits,
+    /// from a bounded walk of history behind the merge base.
+    pub committer_offsets: HashMap<String, HashMap<i32, u32>>,
+    /// Committer time of each incoming commit's parents that are not themselves incoming
+    /// (id → committer time), so date checks can compare against them.
+    pub parent_times: HashMap<String, i64>,
+    /// "Now" in unix seconds (injected so tests are deterministic).
+    pub now: i64,
 }

@@ -7,11 +7,11 @@
 
 | | |
 |---|---|
-| **Phase** | 1: Read-only engine and `scan` / `check` (mostly done) |
-| **Last completed** | Engine, gix delta, T1/T2/T3/T7/T8/T12/path detectors, `scan` + `check`, fixture harness, 33 tests green |
-| **Next task** | Finish Phase 1: `insta` snapshot tests of the terminal report; group repeated T12 findings into one summary finding. Then Phase 2 (`pull` + T10/T11 + trust store). |
+| **Phase** | 2 done → 3 next: deep content detectors (v0.2) |
+| **Last completed** | Phase 2: `git shield pull` gate, T10/T11 provenance (offline), trust store (ADR 0003), correlation escalation; Phase 1 leftovers (grouped report, insta snapshots). 52 tests green |
+| **Next task** | Phase 3: T4 AI-agent configs first (highest 2026 activity), then T5, T6, T9, T13, `signatures.toml`, user allowlist |
 | **Blockers** | None |
-| **Perf** | `scan af20233d8..d9351023d` on matador-legacy (20 commits, 58 file versions): **~40 ms** warm (target < 300 ms) |
+| **Perf** | Warm, release build, matador-legacy: `scan af20233d8..d9351023d` (20 commits, 58 file versions) **~30 ms**; `scan HEAD..origin/dev` with provenance **~20 ms** (target < 300 ms) |
 
 ## Phase checklist
 
@@ -31,17 +31,19 @@
 - [x] Preflight refuses to spawn git on Critical local config (GitSpawn)
 - [x] Integration tests (8) incl. "fsmonitor never fires even with --allow-unsafe-config"
 - [x] Verified on the real matador-legacy incident range
-- [ ] `insta` snapshot tests for the terminal output
-- [ ] Group T12 findings (10 files → one summary + per-file details) to reduce noise
+- [x] `insta` snapshot tests for the terminal output (`crates/git-shield/tests/snapshots.rs`; SHAs/ids redacted)
+- [x] Group repetitive findings (≥4 of one rule, all ≤ Medium) into one block in the terminal report (display only; ids unchanged)
 - [x] Pushed to GitHub; CI green on macOS + Linux (run 43615839044)
 
 ### Phase 2: `git shield pull` gate (v0.1)
-- [ ] `pull` = preflight → fetch → scan → decide → `merge --ff-only` (`--rebase` / `--merge` opt-in)
-- [ ] T10: non-fast-forward / remote ref rewrote a previously seen tip (remote-tracking reflog + trust store)
-- [ ] T11: duplicate-subject commits with a different SHA, signature dropped, "Merge pull request" not committed by GitHub, tz/date anomalies
-- [ ] Trust store `.git/shield/trusted.json` (last accepted tip per ref, accepted ids + reason)
-- [ ] Interactive confirm on TTY
-- [ ] Fixture: the matador incident must block via T10/T11 even with the font removed
+- [x] `pull` = preflight (stricter: checkout-time drivers) → fetch → scan → decide → integrate the **scanned SHA** (`--ff-only` default; `--rebase` / `--merge` opt-in; diverged without a flag → exit 3)
+- [x] T10 `t10.ref-rewritten`: previous tips (pre-fetch value, reflog within window, trust store) not contained in the new tip; maximal only; own `git push` transitions ignored
+- [x] T11 `t11.rewritten-copy` (Critical when the signature is dropped or the committer changed), `t11.merge-not-by-github`, `t11.unusual-timezone`, `t11.date-anomaly`
+- [x] `t10.tampered-payload`: Critical correlation when a rewrite/impersonation carried a transited High+ payload (`Finding.capped_from`)
+- [x] Trust store in the user data dir (ADR 0003): ref tips + accepted ids with reason; honoured by every command
+- [x] Interactive confirm on TTY (dialoguer, default no; non-TTY → exit 2, never hangs)
+- [x] Fixture: the matador incident blocks via T10/T11 even with the font removed (`matador_incident_with(IncidentOpts { font: false })`)
+- [x] `scan --previous-tip <REV>` for forensics; replays the real 2026-11-10 incident offline
 
 ### Phase 3: Deep content detectors (v0.2)
 - [ ] T4 AI-agent configs · T5 lifecycle scripts · T6 shell env · T9 devcontainer/CI · T13 obfuscation
@@ -59,7 +61,10 @@
 
 ## Known gaps / ideas (not yet scheduled)
 - T12 multiset diff is an approximation (counts e.g. 12 vs git's 8 on `matador_admin/task.py`). Good enough for the ratio; swap in imara-diff if exact counts are needed.
-- A transited payload is capped at Medium. Once T10/T11 exist, a forged commit carrying a transited payload should escalate (e.g. Critical "tampered history carried a payload").
+- ~~Escalate a transited payload carried by forged history~~ Done in session 2 (`t10.tampered-payload`).
+- Reflog window without a trust-store record is 30 days. Rewrites older than that (or in a repo whose reflog is disabled/expired) are only caught via the pre-fetch tip or `--previous-tip`. Phase 4 (GitHub activity API) closes this.
+- `t11.merge-not-by-github` fires on every historical forged merge in a range, which is noisy on long ranges. Consider grouping, or limiting it to commits not already reported by `t11.rewritten-copy`.
+- No user-facing way yet to list or forget stored acceptances (`git shield trust …`). Add it with the Phase 3 allowlist work.
 - `read_local_state` reads `config` + `config.worktree` and skips includes. Consider reporting the include target path itself.
 - Real-world note: VS Code's GitHub extension writes thousands of `github-pr-owner-number` values into `.git/config`. That once made the config read quadratic (fixed; keep a test in mind).
 
@@ -71,3 +76,17 @@
 - Implemented the Phase 1 engine, detectors, and CLI. Fixed a quadratic config read found on real data (2.2 s → 40 ms).
 - Verified against matador-legacy `af20233d8..d9351023d`. It found the transited `eslint-check` folderOpen task and `allowAutomaticTasks` in forged commit `24f921bf2`, plus CRLF masking in 10 files (e.g. `agent/views.py` 19,521 raw lines → 71 real).
 - Tests: 33 passing (24 detector unit, 1 engine, 8 CLI end-to-end). Clippy clean with `-D warnings`.
+
+### 2026-11-16: Session 2 (Phase 1 close-out + Phase 2)
+- Report: rules with 4 or more findings at Medium or below render as one block (matador's 10 CRLF files are now one block). Headers are pluralised. `insta` snapshots cover matador check, blocked pull, clean, and CRLF-only.
+- `shield-core`: `Provenance`/`Rewrite`/`TipSource` in `ScanContext`; `Finding.capped_from`.
+- `shield-git`:
+  - `provenance.rs` reads reflogs via gix `log_iter`, finds maximal non-ancestor previous tips, collects lost commits (cap 500), learns committer timezone habits (2,000-commit walk), and records parent times.
+  - `trust.rs` is the trust store (ADR 0003).
+  - `hardened.rs` gains `merge` and `rebase`, and sets the editors to `:`.
+- `shield-rules/provenance.rs`: `RefRewritten`, `Impersonation`, and `TamperedPayload` (runs last).
+- CLI: `git shield pull [REMOTE] [BRANCH] [--rebase|--merge] [--reason]`. Stored acceptances apply to `scan`/`check`/`pull`. `scan --previous-tip`.
+- **Real-data verification (read-only, matador-legacy):**
+  - `scan d9d45eff3..0a32698f4 --previous-tip d9d45eff3` is now **BLOCKED**. It reports `t11.rewritten-copy` Critical on `24f921bf2` (signature dropped; committer `GitHub` → `Hycienth E.O`; tz +0100 → -0800), plus `t10.ref-rewritten` High and the `t10.tampered-payload` Critical correlation.
+  - `scan HEAD..origin/dev` is CLEAN. The reflog's 2026-11-12 attacker tip `d539f2feb` is correctly ignored because the user's own restore push replaced it. The first prototype flagged it, which led to the own-push rule.
+- Tests: 52 (31 rule unit, 1 engine, 1 trust store, 15 CLI end-to-end, 4 snapshots). Clippy clean with `-D warnings`.

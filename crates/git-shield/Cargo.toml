@@ -20,6 +20,7 @@ shield-rules = { workspace = true }
 shield-report = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+dialoguer = { workspace = true }
 
 [dev-dependencies]
 shield-fixtures = { path = "../shield-fixtures" }
@@ -27,6 +28,7 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
+insta = { workspace = true }
 
 [lints]
 workspace = true

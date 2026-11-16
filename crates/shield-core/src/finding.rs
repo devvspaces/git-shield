@@ -139,6 +139,9 @@ pub struct Finding {
     /// the final incoming tree.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub transited: bool,
+    /// Original severity when the engine lowered it (transited content).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capped_from: Option<Severity>,
 }
 
 impl Finding {
@@ -154,6 +157,7 @@ impl Finding {
             anchor: None,
             details: Vec::new(),
             transited: false,
+            capped_from: None,
         }
     }
 

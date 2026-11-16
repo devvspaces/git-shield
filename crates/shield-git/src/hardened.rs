@@ -54,6 +54,9 @@ impl HardenedGit {
             .env_remove("GIT_CONFIG_COUNT")
             .env_remove("GIT_EXTERNAL_DIFF")
             .env_remove("GIT_PAGER")
+            // Never open an editor (merge/rebase run non-interactively).
+            .env("GIT_EDITOR", ":")
+            .env("GIT_SEQUENCE_EDITOR", ":")
             .env("GIT_OPTIONAL_LOCKS", "0");
         cmd
     }
@@ -81,7 +84,19 @@ impl HardenedGit {
     }
 
     /// Fast-forward the current branch to `target`. Refuses anything else.
+    /// Callers pass the scanned commit id, never a ref name, so a ref that
+    /// moves after the scan cannot slip unscanned commits in.
     pub fn merge_ff_only(&self, target: &str) -> Result<()> {
         self.run(&["merge", "--ff-only", "--no-edit", target], true).map(|_| ())
+    }
+
+    /// Merge `target` (a scanned commit id) with a merge commit if needed.
+    pub fn merge(&self, target: &str) -> Result<()> {
+        self.run(&["merge", "--no-edit", target], true).map(|_| ())
+    }
+
+    /// Rebase the current branch onto `target` (a scanned commit id).
+    pub fn rebase(&self, target: &str) -> Result<()> {
+        self.run(&["rebase", "--no-autosquash", target], true).map(|_| ())
     }
 }

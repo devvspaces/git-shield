@@ -1,0 +1,8 @@
+---
+source: crates/git-shield/tests/snapshots.rs
+expression: "run(&f, &[\"check\"])"
+---
+exit: 0
+git-shield · HEAD..origin/dev · 1 commit, 1 file version scanned
+
+CLEAN  (no findings)

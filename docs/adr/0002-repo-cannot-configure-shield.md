@@ -8,7 +8,7 @@ Many scanners read a config file from the repo they scan (`.toolrc`, allowlists)
 ## Decision
 git-shield reads configuration only from:
 1. the user config dir (`~/.config/git-shield/config.toml`, Phase 3+);
-2. the per-repo trust store in `.git/shield/` (untracked; written only by git-shield after an explicit `--accept`, Phase 2+);
+2. the per-repo trust store, written only by git-shield after an explicit `--accept` or pull. It lives in the user data dir, not `.git/` (see [ADR 0003](0003-trust-store-in-user-data-dir.md));
 3. command-line flags.
 
 No tracked file in the scanned repository influences rules, severities, or allowlists.

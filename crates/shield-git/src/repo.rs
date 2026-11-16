@@ -40,6 +40,10 @@ impl GitRepo {
         Ok(GitRepo { repo })
     }
 
+    pub(crate) fn repo(&self) -> &gix::Repository {
+        &self.repo
+    }
+
     pub fn git_dir(&self) -> &Path {
         self.repo.git_dir()
     }
@@ -146,6 +150,7 @@ impl GitRepo {
             transited,
             commits,
             local: Some(local::read_local_state(self)?),
+            provenance: None,
         })
     }
 

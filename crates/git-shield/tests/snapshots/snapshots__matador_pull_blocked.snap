@@ -1,0 +1,70 @@
+---
+source: crates/git-shield/tests/snapshots.rs
+expression: "run(&f, &[\"pull\"])"
+---
+exit: 2
+git-shield · HEAD..origin/dev · 3 commits, 8 file versions scanned
+
+ CRITICAL  GS-T10-[id]  Rewritten history carried a payload that was later removed
+           @ [sha]
+           · History was rewritten or impersonated, and an intermediate commit added content that runs code:
+           ·   Workspace enables automatic tasks (.vscode/settings.json @ [sha])
+           ·   Task `eslint-check` runs automatically when the folder is opened (.vscode/tasks.json @ [sha])
+           ·   `origin/dev` was rewritten (force-push): [sha] is no longer in its history
+           ·   Commit [sha] is a rewritten copy of [sha] ("Merge pull request #2921 from org/fix-transfer-ownership-bug")
+           · Anyone who checked out the intermediate commit, or whose editor/CI ran in it, may have executed it.
+
+ CRITICAL  GS-T11-[id]  Commit [sha] is a rewritten copy of [sha] ("Merge pull request #2921 from org/fix-transfer-ownership-bug")
+           @ [sha]
+           · Same summary, author (Hycienth E.O <1038+hycienth@users.noreply.github.com>) and author date as the dropped original.
+           · Signature: original was signed, the copy is not.
+           · Committer: GitHub <noreply@github.com> → Hycienth E.O <1038+hycienth@users.noreply.github.com>
+           · Committer timezone: +0100 → -0800
+           · Content differs from the original; compare: git diff [sha] [sha]
+
+ CRITICAL  GS-T2-[id]  `.ttf` font is actually source code
+           public/fonts/fa-solid-600.ttf
+           · No valid .ttf header; content is text with code markers: const , function, process., require(
+           · size 215 bytes, longest line 83 chars
+           · This is the fake-font technique used by DPRK 'Contagious Interview' campaigns: an auto-run task runs `node <font>`.
+
+ HIGH      GS-T10-[id]  `origin/dev` was rewritten (force-push): [sha] is no longer in its history
+           @ [sha]
+           · Previous tip [sha] (fetched before).
+           · 1 commit(s) dropped from the branch:
+           ·   [sha]  Merge pull request #2921 from org/fix-transfer-ownership-bug  (Hycienth E.O)
+           · Confirm with whoever owns the branch before pulling. On GitHub: repository → Activity → force pushes.
+
+ MEDIUM    GS-T11-[id]  GitHub-style merge commit was not committed by GitHub
+           @ [sha]
+           · "Merge pull request #2921 from org/fix-transfer-ownership-bug"
+           · Committer is Hycienth E.O <1038+hycienth@users.noreply.github.com>; merges made on GitHub are committed by GitHub <noreply@github.com>.
+
+ MEDIUM    GS-T12-[id]  Line-ending rewrite hides 4 real changed lines
+           app/views.py
+           · raw diff ≈ 606 lines, ignoring whitespace ≈ 4 lines
+           · line endings converted LF → CRLF
+           · Review the real change with: git diff --ignore-cr-at-eol -w <range> -- <path>
+
+ MEDIUM    GS-T3-[id]  Workspace enables automatic tasks  [in history only]
+           .vscode/settings.json  @ [sha]
+           · task.allowAutomaticTasks = true
+           · This lets folderOpen tasks run without a prompt. Malicious repos set it alongside tasks.json.
+           · Severity lowered from high because this content is not in the final incoming tree; it was added by an intermediate commit and later removed.
+
+ MEDIUM    GS-T1-[id]  Task `eslint-check` runs automatically when the folder is opened  [in history only]
+           .vscode/tasks.json  @ [sha]
+           · command: node ./public/fonts/fa-solid-600.ttf
+           · hidden from the user: reveal, echo:false, close:true, hide:true, isBackground
+           · runs an interpreter on a non-script file (disguised payload): node ./public/fonts/fa-solid-600.ttf
+           · label `eslint-check` matches a known malware decoy
+           · Fix: delete the task (or the file) unless you wrote it; set `task.allowAutomaticTasks: off` in your user settings.
+           · Severity lowered from critical because this content is not in the final incoming tree; it was added by an intermediate commit and later removed.
+
+ LOW       GS-PATH-[id]  Sensitive file added  [in history only]
+           .vscode/extensions.json  @ [sha]
+           · VS Code workspace config (tasks/settings/launch can run code)
+
+BLOCKED: 4 finding(s) at high or above  (3 critical, 1 high, 4 medium, 1 low, 2 info)
+2 info finding(s) hidden; use --verbose to show
+After reviewing, accept with: --accept GS-T10-[id] --accept GS-T11-[id] --accept GS-T2-[id] --accept GS-T10-[id]

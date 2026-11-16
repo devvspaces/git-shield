@@ -4,8 +4,9 @@
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use shield_core::{Report, ScanContext, Severity};
-use shield_git::{GitRepo, hardened::HardenedGit};
+use shield_core::{Report, ScanContext, Severity, TipSource};
+use shield_git::trust::TrustStore;
+use shield_git::{GitRepo, ObjectId, ProvenanceInput, hardened::HardenedGit};
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -26,24 +27,53 @@ enum Command {
     /// Defaults to HEAD..<upstream of current branch>.
     Scan {
         range: Option<String>,
+        /// A tip you had before (repeatable). Reports a rewrite if the range end no longer contains it.
+        #[arg(long, value_name = "REV")]
+        previous_tip: Vec<String>,
         #[command(flatten)]
         common: Common,
     },
     /// Fetch (hardened, objects only) and scan what a pull would bring in. Never merges.
     Check {
-        /// Remote name; defaults to the current branch's upstream remote.
-        remote: Option<String>,
-        /// Remote branch; defaults to the current branch's upstream branch.
-        branch: Option<String>,
+        #[command(flatten)]
+        target: Target,
         /// Skip the fetch and scan the existing remote-tracking ref.
         #[arg(long)]
         no_fetch: bool,
-        /// Fetch even if the local git config contains critical execution settings.
-        #[arg(long)]
-        allow_unsafe_config: bool,
         #[command(flatten)]
         common: Common,
     },
+    /// Fetch, scan, and fast-forward only if nothing blocking was found.
+    ///
+    /// Merges exactly the commit that was scanned. Blocking findings must be
+    /// accepted (`--accept ID`, or interactively on a terminal) to continue;
+    /// accepted ids are remembered for this repository.
+    Pull {
+        #[command(flatten)]
+        target: Target,
+        /// Rebase local commits onto the scanned tip instead of requiring a fast-forward.
+        #[arg(long, conflicts_with = "merge")]
+        rebase: bool,
+        /// Create a merge commit if a fast-forward is not possible.
+        #[arg(long)]
+        merge: bool,
+        /// Why the accepted findings are fine (stored with them).
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+        #[command(flatten)]
+        common: Common,
+    },
+}
+
+#[derive(Args)]
+struct Target {
+    /// Remote name; defaults to the current branch's upstream remote.
+    remote: Option<String>,
+    /// Remote branch; defaults to the current branch's upstream branch.
+    branch: Option<String>,
+    /// Run git even if the local git config contains settings that execute programs.
+    #[arg(long)]
+    allow_unsafe_config: bool,
 }
 
 #[derive(Args)]
@@ -54,7 +84,7 @@ struct Common {
     /// Emit the report as JSON.
     #[arg(long)]
     json: bool,
-    /// Also show info-level findings.
+    /// Also show info-level findings, and every finding of grouped rules.
     #[arg(long, short)]
     verbose: bool,
     /// Treat this finding id as reviewed (may be repeated).
@@ -76,70 +106,249 @@ fn main() -> ExitCode {
     }
 }
 
+fn now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
 fn run(cli: Cli) -> Result<u8> {
     match cli.command {
-        Command::Scan { range, common } => {
+        Command::Scan { range, previous_tip, common } => {
             let repo = GitRepo::discover(&common.repo)?;
-            let (from, to, label) = resolve_range(&repo, range.as_deref())?;
-            let ctx = repo.incoming(from, to, label)?;
+            let store = TrustStore::open(&repo)?;
+            let (from, to, b, label) = resolve_range(&repo, range.as_deref())?;
+            let given =
+                previous_tip.iter().map(|r| Ok((repo.resolve(r)?, TipSource::Given))).collect::<Result<Vec<_>>>()?;
+            // Provenance needs a ref; with only --previous-tip, use the range end itself.
+            let ref_name = repo.full_ref_name(&b).or_else(|| (!given.is_empty()).then(|| b.clone()));
+            let ctx = build_context(&repo, &store, from, to, label, ref_name.as_deref(), &given)?;
             let report = scan(&ctx);
-            Ok(emit(&report, &common))
+            Ok(emit(&report, &accepted(&common, &store), &common))
         }
-        Command::Check { remote, branch, no_fetch, allow_unsafe_config, common } => {
+        Command::Check { target, no_fetch, common } => {
             let repo = GitRepo::discover(&common.repo)?;
-            let (remote, branch) = match (remote, branch) {
-                (Some(r), Some(b)) => (r, b),
-                (r, b) => {
-                    let up = repo.upstream()?;
-                    (r.unwrap_or(up.remote), b.unwrap_or(up.branch))
-                }
-            };
-
+            let (remote, branch) = target_names(&repo, &target)?;
+            let tracking = format!("refs/remotes/{remote}/{branch}");
+            let mut prefetch = None;
             if !no_fetch {
-                preflight(&repo, allow_unsafe_config, &common)?;
-                let workdir = repo.workdir().unwrap_or_else(|| repo.git_dir().to_path_buf());
-                if !common.json {
-                    eprintln!("git-shield: fetching {remote} {branch} (hardened, no checkout)…");
-                }
-                HardenedGit::new(&workdir)?.fetch(&remote, Some(&branch))?;
+                preflight(&repo, target.allow_unsafe_config, false, &common)?;
+                prefetch = repo.ref_tip(&tracking);
+                fetch(&repo, &remote, &branch, &common)?;
             }
-
             // Re-open so refs updated by the fetch are visible.
             let repo = GitRepo::discover(&common.repo)?;
-            let tracking = format!("refs/remotes/{remote}/{branch}");
+            let store = TrustStore::open(&repo)?;
             let from = repo.resolve("HEAD")?;
             let to = repo.resolve(&tracking).with_context(|| format!("remote-tracking ref {tracking} not found"))?;
-            let ctx = repo.incoming(from, to, format!("HEAD..{remote}/{branch}"))?;
-            Ok(emit(&scan(&ctx), &common))
+            let extra: Vec<_> = prefetch.map(|p| (p, TipSource::PreFetch)).into_iter().collect();
+            let ctx =
+                build_context(&repo, &store, from, to, format!("HEAD..{remote}/{branch}"), Some(&tracking), &extra)?;
+            Ok(emit(&scan(&ctx), &accepted(&common, &store), &common))
+        }
+        Command::Pull { target, rebase, merge, reason, common } => pull(target, rebase, merge, reason, common),
+    }
+}
+
+fn pull(target: Target, rebase: bool, merge: bool, reason: Option<String>, common: Common) -> Result<u8> {
+    let repo = GitRepo::discover(&common.repo)?;
+    let (remote, branch) = target_names(&repo, &target)?;
+    let tracking = format!("refs/remotes/{remote}/{branch}");
+
+    preflight(&repo, target.allow_unsafe_config, true, &common)?;
+    let prefetch = repo.ref_tip(&tracking);
+    fetch(&repo, &remote, &branch, &common)?;
+
+    let repo = GitRepo::discover(&common.repo)?;
+    let mut store = TrustStore::open(&repo)?;
+    let head = repo.resolve("HEAD")?;
+    let tip = repo.resolve(&tracking).with_context(|| format!("remote-tracking ref {tracking} not found"))?;
+    let extra: Vec<_> = prefetch.map(|p| (p, TipSource::PreFetch)).into_iter().collect();
+    let ctx = build_context(&repo, &store, head, tip, format!("HEAD..{remote}/{branch}"), Some(&tracking), &extra)?;
+    let report = scan(&ctx);
+    let mut accepted = accepted(&common, &store);
+    emit(&report, &accepted, &common);
+
+    let up_to_date = repo.is_ancestor(tip, head)?;
+    let fast_forward = repo.is_ancestor(head, tip)?;
+    if !up_to_date && !fast_forward && !rebase && !merge {
+        bail!(
+            "HEAD and {remote}/{branch} have diverged; nothing was changed. \
+             Re-run with --rebase or --merge (the scanned commit {} is what will be integrated).",
+            short(&tip)
+        );
+    }
+
+    // Decide.
+    let mut newly_accepted: Vec<String> =
+        common.accept.iter().filter(|id| report.findings.iter().any(|f| &f.id.0 == *id)).cloned().collect();
+    let blocking: Vec<String> = report.blocking(&accepted).map(|f| f.id.0.clone()).collect();
+    let mut reason = reason;
+    if !blocking.is_empty() {
+        if !interactive(&common) {
+            eprintln!("git-shield: pull blocked; nothing was merged.");
+            return Ok(2);
+        }
+        let ok = dialoguer::Confirm::new()
+            .with_prompt(format!("Accept {} blocking finding(s) and pull anyway?", blocking.len()))
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("git-shield: pull aborted; nothing was merged.");
+            return Ok(2);
+        }
+        if reason.is_none() {
+            let r: String = dialoguer::Input::new()
+                .with_prompt("Reason (stored with the acceptance)")
+                .allow_empty(true)
+                .interact_text()
+                .unwrap_or_default();
+            reason = Some(r);
+        }
+        accepted.extend(blocking.iter().cloned());
+        newly_accepted.extend(blocking);
+    }
+
+    if up_to_date {
+        if !common.json {
+            eprintln!("git-shield: already up to date.");
+        }
+    } else {
+        let workdir = repo.workdir().context("pull needs a working tree")?;
+        let git = HardenedGit::new(&workdir)?;
+        // Integrate exactly the scanned commit, never the (movable) ref name.
+        let sha = tip.to_string();
+        let how = if fast_forward {
+            git.merge_ff_only(&sha)?;
+            "fast-forward"
+        } else if rebase {
+            git.rebase(&sha)?;
+            "rebased"
+        } else {
+            git.merge(&sha)?;
+            "merged"
+        };
+        if !common.json {
+            eprintln!("git-shield: {} → {} ({how})", short(&head), short(&tip));
         }
     }
+
+    let reason = reason.filter(|r| !r.trim().is_empty()).unwrap_or_else(|| "accepted via --accept".into());
+    let t = now();
+    let tip_hex = tip.to_string();
+    for id in &newly_accepted {
+        store.accept(id, &reason, Some(&tip_hex), t);
+    }
+    store.set_tip(&tracking, &tip_hex, t);
+    store.save().with_context(|| format!("writing trust store {}", store.path().display()))?;
+
+    Ok(report.exit_code(&accepted) as u8)
+}
+
+fn short(id: &ObjectId) -> String {
+    id.to_hex_with_len(9).to_string()
+}
+
+fn interactive(common: &Common) -> bool {
+    !common.json && std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+fn target_names(repo: &GitRepo, target: &Target) -> Result<(String, String)> {
+    Ok(match (&target.remote, &target.branch) {
+        (Some(r), Some(b)) => (r.clone(), b.clone()),
+        (r, b) => {
+            let up = repo.upstream()?;
+            (r.clone().unwrap_or(up.remote), b.clone().unwrap_or(up.branch))
+        }
+    })
+}
+
+fn fetch(repo: &GitRepo, remote: &str, branch: &str, common: &Common) -> Result<()> {
+    let workdir = repo.workdir().unwrap_or_else(|| repo.git_dir().to_path_buf());
+    if !common.json {
+        eprintln!("git-shield: fetching {remote} {branch} (hardened, no checkout)…");
+    }
+    HardenedGit::new(&workdir)?.fetch(remote, Some(branch))?;
+    Ok(())
+}
+
+/// Scan context plus provenance for `ref_name` (when the target is a ref).
+fn build_context(
+    repo: &GitRepo,
+    store: &TrustStore,
+    from: ObjectId,
+    to: ObjectId,
+    label: String,
+    ref_name: Option<&str>,
+    known_tips: &[(ObjectId, TipSource)],
+) -> Result<ScanContext> {
+    let mut ctx = repo.incoming(from, to, label)?;
+    let Some(ref_name) = ref_name else { return Ok(ctx) };
+    let t = now();
+    let mut extra = known_tips.to_vec();
+    let trusted = store.trusted_tip(ref_name);
+    if let Some(tt) = trusted
+        && let Ok(oid) = ObjectId::from_hex(tt.tip.as_bytes())
+    {
+        extra.push((oid, TipSource::TrustStore));
+    }
+    let base = ctx.base.as_deref().and_then(|b| ObjectId::from_hex(b.as_bytes()).ok());
+    let input = ProvenanceInput {
+        ref_name,
+        new_tip: to,
+        base,
+        commits: &ctx.commits,
+        extra: &extra,
+        reflog_since: trusted.map_or(t - shield_git::REFLOG_WINDOW_SECS, |tt| tt.at),
+        now: t,
+    };
+    ctx.provenance = Some(repo.provenance(&input)?);
+    Ok(ctx)
 }
 
 fn scan(ctx: &ScanContext) -> Report {
     shield_core::run(&shield_rules::builtin(), ctx)
 }
 
+/// Config keys the hardened runner already overrides on the command line.
+const NEUTRALISED: &[&str] = &["core.fsmonitor", "core.hookspath", "core.pager", "diff.external", "protocol.ext.allow"];
+
 /// Refuse to spawn git when the local config would make it run attacker code.
-fn preflight(repo: &GitRepo, allow: bool, common: &Common) -> Result<()> {
+///
+/// `fetch` only needs Critical keys to be absent. When git will also touch the
+/// working tree (`pull`), High keys that fire on checkout/merge (filters,
+/// merge drivers, gpg programs) block as well, unless already neutralised.
+fn preflight(repo: &GitRepo, allow: bool, worktree: bool, common: &Common) -> Result<()> {
     let ctx = ScanContext {
         label: "local git config".into(),
         local: Some(shield_git::read_local_state(repo)?),
         ..Default::default()
     };
     let report = scan(&ctx);
-    let critical: Vec<_> = report.findings.iter().filter(|f| f.severity == Severity::Critical).collect();
-    if critical.is_empty() || allow {
+    let refuse: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| match f.severity {
+            Severity::Critical => true,
+            Severity::High if worktree && f.rule == "git.local-config" => {
+                let key = f.anchor.as_deref().and_then(|a| a.split_once('=')).map(|(k, _)| k.to_ascii_lowercase());
+                !key.is_some_and(|k| NEUTRALISED.contains(&k.as_str()))
+            }
+            _ => false,
+        })
+        .collect();
+    if refuse.is_empty() || allow {
         return Ok(());
     }
     eprint!("{}", shield_report::terminal(&report, &HashSet::new(), color(common), common.verbose));
     bail!(
         "local git config contains settings that make git execute programs ({}); refusing to run git. \
          Remove them or pass --allow-unsafe-config.",
-        critical.iter().map(|f| f.id.0.as_str()).collect::<Vec<_>>().join(", ")
+        refuse.iter().map(|f| f.id.0.as_str()).collect::<Vec<_>>().join(", ")
     )
 }
 
-fn resolve_range(repo: &GitRepo, range: Option<&str>) -> Result<(shield_git::ObjectId, shield_git::ObjectId, String)> {
+/// Returns (from, to, B spec, label).
+fn resolve_range(repo: &GitRepo, range: Option<&str>) -> Result<(ObjectId, ObjectId, String, String)> {
     let (a, b) = match range {
         Some(r) if r.contains("...") => {
             let (a, b) = r.split_once("...").unwrap();
@@ -154,19 +363,23 @@ fn resolve_range(repo: &GitRepo, range: Option<&str>) -> Result<(shield_git::Obj
     };
     let from = repo.resolve(&a)?;
     let to = repo.resolve(&b)?;
-    Ok((from, to, format!("{a}..{b}")))
+    let label = format!("{a}..{b}");
+    Ok((from, to, b, label))
+}
+
+fn accepted(common: &Common, store: &TrustStore) -> HashSet<String> {
+    common.accept.iter().cloned().chain(store.accepted_ids().map(str::to_string)).collect()
 }
 
 fn color(common: &Common) -> bool {
     !common.no_color && !common.json && std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
 }
 
-fn emit(report: &Report, common: &Common) -> u8 {
-    let accepted: HashSet<String> = common.accept.iter().cloned().collect();
+fn emit(report: &Report, accepted: &HashSet<String>, common: &Common) -> u8 {
     if common.json {
         println!("{}", shield_report::json(report));
     } else {
-        print!("{}", shield_report::terminal(report, &accepted, color(common), common.verbose));
+        print!("{}", shield_report::terminal(report, accepted, color(common), common.verbose));
     }
-    report.exit_code(&accepted) as u8
+    report.exit_code(accepted) as u8
 }

@@ -5,12 +5,14 @@ mod gitconfig;
 mod gitmeta;
 mod noise;
 mod paths;
+mod provenance;
 pub(crate) mod util;
 mod vscode;
 
 use shield_core::Detector;
 
-/// All built-in detectors, in no particular order.
+/// All built-in detectors. Context detectors run in this order; the
+/// correlation step (`TamperedPayload`) must stay last.
 pub fn builtin() -> Vec<Box<dyn Detector>> {
     vec![
         Box::new(vscode::Tasks),
@@ -22,6 +24,9 @@ pub fn builtin() -> Vec<Box<dyn Detector>> {
         Box::new(noise::NoiseMasking),
         Box::new(paths::SensitivePaths),
         Box::new(paths::ModeChanges),
+        Box::new(provenance::RefRewritten),
+        Box::new(provenance::Impersonation),
+        Box::new(provenance::TamperedPayload),
     ]
 }
 

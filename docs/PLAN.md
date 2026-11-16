@@ -53,7 +53,7 @@ None of them combines (a) a gate before merge or checkout, (b) history and prove
   - sets `-c core.fsmonitor=false -c core.hooksPath=<empty temp dir> -c core.pager=cat -c diff.external= -c protocol.ext.allow=never -c submodule.recurse=false -c fetch.recurseSubmodules=false`. It does not override `core.sshCommand`, so the user's global value keeps working; a *local* `core.sshCommand` is Critical in the preflight;
   - sets `GIT_TERMINAL_PROMPT=0` (in non-interactive mode only);
   - refuses to start if the T7 local-config audit finds Critical keys, unless overridden.
-- The tool's own configuration lives **only** in the user config dir (`~/.config/git-shield/config.toml`) plus a per-repo trust store in `.git/shield/`, which is not tracked. A repo can never relax its own scanning.
+- The tool's own configuration lives **only** in the user config dir (`~/.config/git-shield/config.toml`) plus a per-repo trust store in the user data dir (ADR 0003; originally planned for `.git/shield/`). A repo can never relax its own scanning.
 
 **Cargo workspace layout** (`~/projects/git-shield`):
 ```
@@ -72,7 +72,7 @@ docs/              # PLAN.md, PROGRESS.md, THREATS.md, adr/
 1. **Pre-flight:** audit local `.git/config` and hooks (T7) using gix's config parser, without running git.
 2. **Fetch:** hardened `git fetch <remote> <branch>`. Objects only; the working tree is untouched.
 3. **Delta:** compute `base = merge-base(HEAD, remote_tip)`, the commit list `base..remote_tip`, and the tree diff `HEAD-tree → remote-tree`. Also diff each commit individually, so payloads that were added and then removed are still reported (as "transited" Medium findings, like the `24f921bf2` → `f99dbe841` case).
-4. **Provenance detectors** (T10, T11) run on the commit list, reflog, and trust store (`.git/shield/trusted.json`: last accepted tip per remote ref, plus the commit fingerprints seen).
+4. **Provenance detectors** (T10, T11) run on the commit list, reflog, and trust store (user data dir, ADR 0003: last accepted tip per remote ref, plus accepted ids with reasons).
 5. **Content detectors** (T1–T9, T12, T13) run on the changed blobs only, in parallel (rayon). An aho-corasick prefilter finds candidate files; each detector then parses only those. There are size caps, Git LFS pointers are skipped, and binaries are sniffed by magic bytes (the `infer` crate).
 6. **Report and decide:** findings are sorted by severity. Exit codes: 0 clean, 1 warnings, 2 blocked, 3 error. In `pull`, if the result is blocked and not every blocking finding was accepted, abort before the merge. Otherwise run the hardened `merge --ff-only` (or `--rebase` / merge per flags) and update the trust store.
 
@@ -101,7 +101,7 @@ Each phase ends with: green `cargo test` + `cargo clippy -D warnings`, the PROGR
 ### Phase 2: The gate, `git shield pull` (v0.1, first usable release)
 - `pull` = pre-flight → fetch → scan → decide → hardened `merge --ff-only` (default). `--rebase` and `--merge` are opt-in.
 - Provenance detectors **T10 and T11, offline**: non-fast-forward, the remote tip rewriting a previously trusted tip (trust store and reflog), duplicate-subject commits with changed SHA or signature, `%G?`-equivalent signature *presence* (full cryptographic verification is in Phase 5), timezone and date anomalies, "Merge pull request" commits whose committer isn't `GitHub`.
-- Trust store `.git/shield/trusted.json` and `--accept <id> --reason "…"`. An interactive confirm is shown when on a TTY.
+- Trust store (user data dir, ADR 0003) and `--accept <id> --reason "…"`. An interactive confirm is shown when on a TTY.
 - **Done when:** on the matador fixture, `pull` blocks with exit code 2, and after `--accept` of all blocking IDs it fast-forwards. On a clean fixture it fast-forwards silently. The PWNED marker never appears.
 
 ### Phase 3: Deep content detectors (v0.2)
@@ -177,3 +177,10 @@ Each phase ends with: green `cargo test` + `cargo clippy -D warnings`, the PROGR
   - The hardened runner no longer sets `protocol.file.allow=never`. It broke legitimate local-path remotes, and the submodule-over-file:// risk is already covered by `--no-recurse-submodules` / `submodule.recurse=false`.
   - Tree diffs use gix's plain `gix::diff::tree` + `Recorder`, not `diff_tree_to_tree`. The latter goes through the blob resource cache / attribute pipeline, which is driver-aware; the plain differ never touches drivers (ADR 0001).
   - The gix feature set is `revision`, `sha1`, `max-performance`, `parallel`; `blob-diff` is not needed.
+- **2026-11-16 (session 2):** Phase 1 closed and Phase 2 built. Changes to the plan:
+  - The trust store moved from `.git/shield/trusted.json` to the user data dir ([ADR 0003](adr/0003-trust-store-in-user-data-dir.md)). A `.git` that arrives as files must not carry its own acceptances.
+  - `pull` integrates the **scanned commit id**, never the ref name, so a ref moving between scan and merge cannot slip unscanned commits in.
+  - The `pull` preflight is stricter than `check`'s. It also refuses High local-config keys that fire on checkout or merge (filter/merge drivers, `gpg.program`) unless the hardened runner already neutralises them. Hardened git also sets `GIT_EDITOR`/`GIT_SEQUENCE_EDITOR` to `:`.
+  - Reflog transitions made by the user's own `git push` never count as rewrites (restores, own rebases).
+  - Added `scan --previous-tip <REV>` for forensics. It replays "I had X before" without a reflog, which is how the real 2026-11-10 incident was re-verified.
+  - The report groups a rule with 4 or more findings at Medium or below into one block. This is display only; ids and JSON are unchanged.

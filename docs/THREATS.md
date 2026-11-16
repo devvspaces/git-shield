@@ -15,8 +15,8 @@ Status: ✅ detector shipped · 🚧 partial · ⏳ planned (phase in brackets)
 | T7 | Local `.git/config` execution keys (`core.fsmonitor`, `core.sshCommand`, `core.hooksPath`, `core.pager`, `diff.external`, `filter.*`, `uploadpack.packObjectsHook`, `alias.*=!`, includes…) and installed hooks | Any git command after a repo arrives *as files* (GitSpawn) | ✅ |
 | T8 | `.gitattributes` custom filter/diff/merge drivers; `.gitmodules` URL swap, `ext::`, `update=!cmd`, path escape | checkout / diff / `submodule update` | ✅ |
 | T9 | `.devcontainer` lifecycle commands; `.github/workflows` with `pull_request_target`, secret exfiltration | Container open / CI | ⏳ [3] (path-risk today) |
-| T10 | History rewrite / force-push over a tip you had already seen | pull after an account compromise | ⏳ [2] |
-| T11 | Impersonated commits: copied merge with a new SHA, dropped signature, "Merge pull request" not committed by GitHub, odd timezone, backdating | same | ⏳ [2] (+ GitHub API [4]) |
+| T10 | History rewrite / force-push over a tip you had already seen | pull after an account compromise | ✅ offline (pre-fetch tip, reflog, trust store) |
+| T11 | Impersonated commits: copied merge with a new SHA, dropped signature, "Merge pull request" not committed by GitHub, odd timezone, backdating | same | ✅ offline (+ GitHub API [4]) |
 | T12 | Whitespace / CRLF churn that buries a small real change in a huge diff | code review | ✅ |
 | T13 | Obfuscated code (eval+base64/hex, `exec(compile(`, zlib+b64 chains, long single lines, high entropy) | running the app | ⏳ [3] |
 

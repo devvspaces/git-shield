@@ -112,6 +112,7 @@ fn mark_transited(f: &mut Finding) {
              it was added by an intermediate commit and later removed.",
             f.severity
         ));
+        f.capped_from = Some(f.severity);
         f.severity = Severity::Medium;
     }
 }

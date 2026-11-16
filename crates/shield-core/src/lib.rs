@@ -8,6 +8,9 @@ mod context;
 mod engine;
 mod finding;
 
-pub use context::{BlobData, CommitInfo, ConfigEntry, FileChange, FileStatus, HookFile, LocalRepoState, ScanContext};
+pub use context::{
+    BlobData, CommitInfo, ConfigEntry, FileChange, FileStatus, HookFile, LocalRepoState, Provenance, Rewrite,
+    ScanContext, TipSource,
+};
 pub use engine::{Detector, Report, run};
 pub use finding::{Finding, FindingId, Severity, Threat};

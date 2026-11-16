@@ -84,6 +84,20 @@ pub fn git_as(dir: &Path, home: &Path, args: &[&str], author: &Identity, committ
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// `git fetch -q origin` with the real clock, so reflog entries carry today's
+/// date (fixture identities use fixed 2025 dates, which would fall outside
+/// git-shield's reflog window).
+pub fn fetch_now(dir: &Path, home: &Path) {
+    let mut cmd = Command::new("git");
+    isolated(&mut cmd, home);
+    let out = cmd
+        .current_dir(dir)
+        .args(["-c", "user.name=Victim", "-c", "user.email=victim@example.com", "fetch", "-q", "origin"])
+        .output()
+        .expect("run git fetch");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
 /// Write a raw commit object (lets tests forge signature headers, committers, dates).
 pub fn write_raw_commit(dir: &Path, home: &Path, raw: &str) -> String {
     let mut cmd = Command::new("git");
@@ -185,6 +199,32 @@ pub fn crlf_only() -> Fixture {
     finish(dir, origin, local)
 }
 
+/// The victim committed locally while a teammate pushed: histories diverge.
+pub fn diverged_local() -> Fixture {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, home, origin, local) = base(&dir);
+    let pusher = root.join("pusher");
+    write(&pusher, "app/views.py", python_module("views").replace("* 7\n", "* 7 + 1\n"));
+    git_as(&pusher, &home, &["commit", "-q", "-am", "Fix total for handler 7"], &EMEKA, &EMEKA);
+    git(&pusher, &home, &["push", "-q", "origin", "dev"]);
+    write(&local, "README.md", "# demo app\n\nLocal notes.\n");
+    git(&local, &home, &["commit", "-q", "-am", "Local README tweak"]);
+    finish(dir, origin, local)
+}
+
+/// Knobs for [`matador_incident_with`].
+#[derive(Debug, Clone, Copy)]
+pub struct IncidentOpts {
+    /// Include the fake-font payload in the forged commit (it survives cleanup).
+    pub font: bool,
+}
+
+impl Default for IncidentOpts {
+    fn default() -> Self {
+        IncidentOpts { font: true }
+    }
+}
+
 /// Faithful, inert reproduction of the 2026-11-10 matador-legacy incident:
 ///
 /// 1. A real PR merge lands on `dev` (signed, committed by GitHub). The victim fetches it.
@@ -194,6 +234,12 @@ pub fn crlf_only() -> Fixture {
 ///    `.env`/`.vscode`, and rewrites Python files to CRLF to bury a small code change.
 /// 3. A later commit removes `.vscode/` (the font and CRLF churn stay).
 pub fn matador_incident() -> Fixture {
+    matador_incident_with(IncidentOpts::default())
+}
+
+/// [`matador_incident`] with options (e.g. without the surviving font payload,
+/// so only provenance can catch it).
+pub fn matador_incident_with(opts: IncidentOpts) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let (root, home, origin, local) = base(&dir);
     let pusher = root.join("pusher");
@@ -225,7 +271,9 @@ pub fn matador_incident() -> Fixture {
     write(&pusher, ".vscode/tasks.json", tasks_json_payload());
     write(&pusher, ".vscode/settings.json", "{\n  \"task.allowAutomaticTasks\": true\n}\n");
     write(&pusher, ".vscode/extensions.json", "{ \"recommendations\": [] }\n");
-    write(&pusher, "public/fonts/fa-solid-600.ttf", fake_font_payload());
+    if opts.font {
+        write(&pusher, "public/fonts/fa-solid-600.ttf", fake_font_payload());
+    }
     write(&pusher, ".gitignore", "node_modules\n");
     // CRLF churn hiding a small real change.
     let views = python_module("views").replace("* 3\n", "* 3 - fee\n").replace("* 9\n", "* 9 * rate\n");
