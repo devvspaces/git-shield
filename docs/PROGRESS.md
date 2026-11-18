@@ -7,9 +7,9 @@
 
 | | |
 |---|---|
-| **Phase** | 3 done (v0.2 content) → 5 next: `clone` / `checkout` / `audit` / `install` / `doctor` (Phase 4 remainder optional) |
-| **Last completed** | Session 4: Phase 3. T4/T5/T6/T9/T13 detectors, `signatures.toml`, user allowlist (ADR 0005), FP run (0 High/Critical on 10 repos). 97 tests green |
-| **Next task** | Phase 5: `git shield clone` (scan full tree before checkout) and `audit` (repos that arrive as files), then `doctor` |
+| **Phase** | 5 done except signature verification (moved to Phase 4 remainder) → next: Phase 4 remainder (commit verification, PR merge-SHA, GPG/SSH) or Phase 6 (SARIF/CI) |
+| **Last completed** | Session 5: `audit`, `clone`, `checkout`, `doctor`, `install`/`uninstall` (shell function, ADR 0006). 106 tests green |
+| **Next task** | Ask the user: Phase 4 remainder (GitHub `verification` + PR merge-SHA match + local GPG/SSH verify) vs Phase 6 (SARIF, `--ci`, GitHub Action) |
 | **Blockers** | None |
 | **Perf** | Warm, release build, matador-legacy: `scan af20233d8..d9351023d` (20 commits, 58 file versions) **~30 ms**; `scan HEAD..origin/dev` with provenance **~20–90 ms** (target < 300 ms); GitHub lookup adds **~1–2 s** of network |
 
@@ -57,7 +57,12 @@
 - [ ] Commit `verification` status for incoming commits, pusher vs author, PR merge-SHA match (`Merge pull request #N` must equal PR N's merge commit), per-SHA cache
 
 ### Phase 5: clone / checkout / audit / install / doctor (v0.4)
-- [ ] `clone`, `checkout`, `audit`, `install` (reference-transaction hook + alias), `doctor`, full signature verification
+- [x] `audit [path] [--rev REV]`: files on disk + .git/config/hooks; no symlink following; deps/build dirs skipped
+- [x] `clone <url> [dir]`: no-checkout clone → whole-tree scan → `reset --hard <sha>` only if clean/accepted; trust tip recorded
+- [x] `checkout <target>`: stricter preflight, HEAD→target tree scan, DWIM remote branches, post-switch HEAD check
+- [x] `doctor`: git / VS Code-family / Claude Code user settings, read-only
+- [x] `install` / `uninstall`: shell function for `git pull` (ADR 0006; the reference-transaction hook was tested and rejected)
+- [ ] Full GPG/SSH signature verification: moved to the Phase 4 remainder
 
 ### Phase 6: yara-x rules, SARIF, GitHub Action, benchmarks (v0.5)
 ### Phase 7: cargo-dist releases, Homebrew, signed artifacts (v1.0)
@@ -73,6 +78,9 @@
 - Content rules see added lines and changed entries per file version. A payload split across two files or two commits only correlates via `t13.payload-wired` (refs) or `t10.tampered-payload`.
 - `t9.workflow.remote-exec` (Medium) fires on common `curl … | sh` installer steps in CI. It was 10 hits across the FP repos. Consider an allowlist of well-known installer hosts.
 - The signature list is small on purpose. Grow it only with sourced entries.
+- The `install` shell function only covers interactive shells. IDE pull buttons and scripts bypass it.
+- `audit` of matador-legacy's working tree takes ~5 s for 3,092 files (disk-bound). Untracked `media/` test placeholders are now Low (graded asset rule).
+- `clone` does not fetch submodules. It prints a note when `.gitmodules` exists; a `--recurse` that scans each submodule is a possible addition.
 - `read_local_state` reads `config` + `config.worktree` and skips includes. Consider reporting the include target path itself.
 - Real-world note: VS Code's GitHub extension writes thousands of `github-pr-owner-number` values into `.git/config`. That once made the config read quadratic (fixed; keep a test in mind).
 
@@ -166,3 +174,26 @@
   - `scan HEAD..origin/dev` is CLEAN (~150 ms);
   - `scan HEAD~300..HEAD` has 0 High/Critical. Its 39 Medium include transited incident traces (`.vscode/tasks.json` folderOpen, a `.ttf` that is source code).
 - Tests: 97.
+
+### 2026-11-18: Session 5 (Phase 5)
+- `shield-git`:
+  - `GitRepo::tree_scan` (whole tree as additions) and `tree_delta` (plain tree diff, no merge base);
+  - `disk::scan_dir`: files on disk with git blob ids, symlinks recorded and not followed, `SKIP_DIRS`, `MAX_FILES`;
+  - hardened `clone_no_checkout`, `reset_hard`, `checkout`;
+  - `remote_names`.
+- CLI:
+  - `audit`, `clone`, `checkout`, `doctor`, `install`/`uninstall`;
+  - shared `gate()` for block / prompt / accept, used by pull/clone/checkout;
+  - `accepted()` works without a repo or store (plain folders);
+  - `pull` accepts `--ff-only` and `--no-rebase` as no-ops.
+- `asset.text-disguised` is graded:
+  - one code marker → High;
+  - plain text ≥ 1 KiB → Medium;
+  - smaller → Low (it was always High).
+
+  Found by auditing matador-legacy's untracked `media/` test uploads ("fake-image-data").
+- **ADR 0006:** a scratch-repo test showed `merge --ff-only` and `reset --hard` write files before a rejecting `reference-transaction` hook runs. The hook plan was dropped for a shell function.
+- **Real data (read-only):**
+  - `audit` on matador-legacy gives 0 High after grading. It reports 2 Medium `t4.claude.permissions` for the local `.claude/settings.local.json` (`Bash(python:*)`).
+  - `doctor` on this machine: WARN `safe.bareRepository`, info `transfer.fsckObjects`; nothing changed.
+- Tests: 106.

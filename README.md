@@ -30,7 +30,7 @@ BLOCKED: 4 finding(s) at high or above  (3 critical, 1 high, 4 medium, 1 low, 2 
 git-shield: pull blocked; nothing was merged.
 ```
 
-> Status: **early development (Phase 3 done)**. `scan`, `check` and the `pull` gate work offline, with an optional GitHub force-push lookup, and cover AI-agent configs, lifecycle scripts, CI and obfuscation; `clone`/`checkout`/`doctor` are next. See [docs/PROGRESS.md](docs/PROGRESS.md).
+> Status: **early development (Phase 3 done)**. `scan`, `check` and the `pull` gate work offline, with an optional GitHub force-push lookup, and cover AI-agent configs, lifecycle scripts, CI and obfuscation; `clone`, `checkout`, `audit`, `doctor` and `install` are in; CI/SARIF and releases are next. See [docs/PROGRESS.md](docs/PROGRESS.md).
 
 ## What it detects
 
@@ -49,7 +49,7 @@ git-shield: pull blocked; nothing was merged.
 | Devcontainers / CI | `initializeCommand` (runs on the host), `toJSON(secrets)`, `pull_request_target` checkouts, self-hosted runner backdoors, script injection |
 | Obfuscation | code hidden off-screen after long whitespace, decode-then-execute, huge lines, high-entropy blobs; and which task/hook/script runs them |
 | Known indicators | a small, sourced list of worm artefacts (`crates/shield-rules/data/signatures.toml`) |
-| *Coming* | GitHub commit verification, `clone`/`checkout` gates, `doctor` |
+| *Coming* | GitHub commit verification and full GPG/SSH signature checks, SARIF / CI mode, releases |
 
 Full list with sources: [docs/THREATS.md](docs/THREATS.md).
 
@@ -72,7 +72,13 @@ git shield check --json             # machine-readable
 git shield check --accept GS-T2-…   # mark a reviewed finding as accepted
 git shield trust list               # what this repo has accepted / last pulled tips
 git shield trust forget GS-T2-…     # un-accept (or --all, or --ref origin/dev)
+git shield clone <url> [dir]        # clone without checkout, scan the whole tree, then check out (or block)
+git shield checkout feature         # scan what switching would write, then switch
+git shield audit [path]             # a repo/folder that arrived as files: scan files + .git/config, run nothing
+git shield doctor                   # check your git / editor / agent settings (read-only)
+git shield install --write          # make plain `git pull` go through `git shield pull` (shell function)
 ```
+`install` adds a small shell function (bash, zsh, fish) between markers in your rc file; `git shield uninstall` removes it, and `GIT_SHIELD_BYPASS=1 git pull` skips it once. IDE pull buttons and scripts that call git directly are not covered. A git hook can't do this job: git writes the files before a hook can refuse the update ([ADR 0006](docs/adr/0006-shell-function-not-reference-transaction-hook.md)).
 Reviewed something your team uses on purpose (an MCP server, a hook)? Allow it in your own config, never the repo's ([ADR 0005](docs/adr/0005-user-allowlist.md)):
 ```toml
 # ~/.config/git-shield/config.toml   (git shield config path / check)
