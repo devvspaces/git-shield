@@ -46,6 +46,11 @@ impl GitRepo {
         self.repo().has_object(id)
     }
 
+    /// Names of configured remotes.
+    pub fn remote_names(&self) -> Vec<String> {
+        self.repo().remote_names().iter().map(|n| n.to_string()).collect()
+    }
+
     /// `remote.<name>.url` from the repository config.
     pub fn remote_url(&self, remote: &str) -> Option<String> {
         let cfg = self.repo().config_snapshot();

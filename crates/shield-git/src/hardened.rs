@@ -95,6 +95,31 @@ impl HardenedGit {
         self.run(&["merge", "--no-edit", target], true).map(|_| ())
     }
 
+    /// `git clone --no-checkout` into `dir` (run from this runner's directory).
+    /// Objects and refs only: no files are written to the working tree, no
+    /// submodules are fetched, no hooks run.
+    pub fn clone_no_checkout(&self, url: &str, dir: &Path, branch: Option<&str>) -> Result<()> {
+        let dir = dir.to_string_lossy();
+        let mut args = vec!["clone", "--no-checkout", "--no-recurse-submodules"];
+        if let Some(b) = branch {
+            args.extend(["--branch", b]);
+        }
+        args.extend(["--", url, &dir]);
+        self.run(&args, true).map(|_| ())
+    }
+
+    /// Populate the index and working tree with exactly `target` (a scanned
+    /// commit id) on the current branch. Used right after a no-checkout clone.
+    pub fn reset_hard(&self, target: &str) -> Result<()> {
+        self.run(&["reset", "-q", "--hard", target], true).map(|_| ())
+    }
+
+    /// `git checkout <target>` (a branch name, so switching keeps working;
+    /// callers verify HEAD afterwards).
+    pub fn checkout(&self, target: &str) -> Result<()> {
+        self.run(&["checkout", "-q", target, "--"], true).map(|_| ())
+    }
+
     /// Rebase the current branch onto `target` (a scanned commit id).
     pub fn rebase(&self, target: &str) -> Result<()> {
         self.run(&["rebase", "--no-autosquash", target], true).map(|_| ())

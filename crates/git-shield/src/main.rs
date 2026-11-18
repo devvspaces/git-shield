@@ -4,6 +4,7 @@
 
 mod audit;
 mod config;
+mod worktree;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -84,6 +85,31 @@ enum Command {
         /// Audit a committed tree (e.g. `HEAD`) instead of the files on disk.
         #[arg(long, value_name = "REV")]
         rev: Option<String>,
+        #[command(flatten)]
+        common: Common,
+    },
+    /// Clone without checking out, scan the whole tree, then check out only if
+    /// nothing blocking was found (or it was accepted).
+    Clone {
+        url: String,
+        dir: Option<PathBuf>,
+        /// Branch to clone (default: the remote's HEAD).
+        #[arg(long, short)]
+        branch: Option<String>,
+        /// Why accepted findings are fine (stored with them).
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+        #[command(flatten)]
+        common: Common,
+    },
+    /// Scan what switching to a branch/commit would write, then switch.
+    Checkout {
+        target: String,
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+        /// Run git even if the local git config contains settings that execute programs.
+        #[arg(long)]
+        allow_unsafe_config: bool,
         #[command(flatten)]
         common: Common,
     },
@@ -252,6 +278,12 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Pull { target, rebase, merge, reason, common } => pull(target, rebase, merge, reason, common),
         Command::Trust { action } => trust(action),
         Command::Audit { path, rev, common } => audit::run(path, rev, &common),
+        Command::Clone { url, dir, branch, reason, common } => {
+            worktree::clone(&url, dir, branch.as_deref(), reason, &common)
+        }
+        Command::Checkout { target, reason, allow_unsafe_config, common } => {
+            worktree::checkout(&target, reason, allow_unsafe_config, &common)
+        }
         Command::Config { action } => {
             let path = config::path().map(|p| p.display().to_string()).unwrap_or_else(|| "(no HOME)".into());
             match action {
@@ -378,36 +410,9 @@ fn pull(target: Target, rebase: bool, merge: bool, reason: Option<String>, commo
         );
     }
 
-    // Decide.
-    let mut newly_accepted: Vec<String> =
-        common.accept.iter().filter(|id| report.findings.iter().any(|f| &f.id.0 == *id)).cloned().collect();
-    let blocking: Vec<String> = report.blocking(&accepted).map(|f| f.id.0.clone()).collect();
-    let mut reason = reason;
-    if !blocking.is_empty() {
-        if !interactive(&common) {
-            eprintln!("git-shield: pull blocked; nothing was merged.");
-            return Ok(2);
-        }
-        let ok = dialoguer::Confirm::new()
-            .with_prompt(format!("Accept {} blocking finding(s) and pull anyway?", blocking.len()))
-            .default(false)
-            .interact()
-            .unwrap_or(false);
-        if !ok {
-            eprintln!("git-shield: pull aborted; nothing was merged.");
-            return Ok(2);
-        }
-        if reason.is_none() {
-            let r: String = dialoguer::Input::new()
-                .with_prompt("Reason (stored with the acceptance)")
-                .allow_empty(true)
-                .interact_text()
-                .unwrap_or_default();
-            reason = Some(r);
-        }
-        accepted.extend(blocking.iter().cloned());
-        newly_accepted.extend(blocking);
-    }
+    let Some(decision) = gate(&report, &mut accepted, &common, reason, "pull", "nothing was merged")? else {
+        return Ok(2);
+    };
 
     if up_to_date {
         if !common.json {
@@ -433,16 +438,72 @@ fn pull(target: Target, rebase: bool, merge: bool, reason: Option<String>, commo
         }
     }
 
-    let reason = reason.filter(|r| !r.trim().is_empty()).unwrap_or_else(|| "accepted via --accept".into());
     let t = now();
     let tip_hex = tip.to_string();
-    for id in &newly_accepted {
-        store.accept(id, &reason, Some(&tip_hex), t);
-    }
+    decision.record(&mut store, &tip_hex, t);
     store.set_tip(&tracking, &tip_hex, t);
     store.save().with_context(|| format!("writing trust store {}", store.path().display()))?;
 
     Ok(report.exit_code(&accepted) as u8)
+}
+
+/// What the user decided about a report's blocking findings.
+struct Decision {
+    /// Ids accepted in this run (`--accept` or the prompt), to remember.
+    newly_accepted: Vec<String>,
+    reason: String,
+}
+
+impl Decision {
+    fn record(&self, store: &mut TrustStore, tip: &str, now: i64) {
+        for id in &self.newly_accepted {
+            store.accept(id, &self.reason, Some(tip), now);
+        }
+    }
+}
+
+/// Block, or let the user accept the blocking findings. `None` means stop
+/// (already explained on stderr); the caller exits 2. Never prompts without a
+/// terminal.
+fn gate(
+    report: &Report,
+    accepted: &mut HashSet<String>,
+    common: &Common,
+    reason: Option<String>,
+    verb: &str,
+    unchanged: &str,
+) -> Result<Option<Decision>> {
+    let mut newly_accepted: Vec<String> =
+        common.accept.iter().filter(|id| report.findings.iter().any(|f| &f.id.0 == *id)).cloned().collect();
+    let blocking: Vec<String> = report.blocking(accepted).map(|f| f.id.0.clone()).collect();
+    let mut reason = reason;
+    if !blocking.is_empty() {
+        if !interactive(common) {
+            eprintln!("git-shield: {verb} blocked; {unchanged}.");
+            return Ok(None);
+        }
+        let ok = dialoguer::Confirm::new()
+            .with_prompt(format!("Accept {} blocking finding(s) and {verb} anyway?", blocking.len()))
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("git-shield: {verb} aborted; {unchanged}.");
+            return Ok(None);
+        }
+        if reason.is_none() {
+            let r: String = dialoguer::Input::new()
+                .with_prompt("Reason (stored with the acceptance)")
+                .allow_empty(true)
+                .interact_text()
+                .unwrap_or_default();
+            reason = Some(r);
+        }
+        accepted.extend(blocking.iter().cloned());
+        newly_accepted.extend(blocking);
+    }
+    let reason = reason.filter(|r| !r.trim().is_empty()).unwrap_or_else(|| "accepted via --accept".into());
+    Ok(Some(Decision { newly_accepted, reason }))
 }
 
 fn short(id: &ObjectId) -> String {

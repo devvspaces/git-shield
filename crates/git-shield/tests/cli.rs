@@ -706,3 +706,60 @@ fn audit_reports_files_and_git_config_without_running_anything() {
     assert!(has(&v, "t6.envrc", "critical", false), "{:#?}", rules(&v));
     assert!(!f.marker_exists());
 }
+
+fn run_in(f: &Fixture, dir: &std::path::Path, args: &[&str]) -> (i32, Value, String) {
+    let out = shield(f).current_dir(dir).args(args).arg("--json").output().unwrap();
+    let v = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+    (out.status.code().unwrap_or(-1), v, String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+#[test]
+fn clone_blocks_before_writing_any_file() {
+    let f = fx::agent_hook();
+    let url = f.origin.to_str().unwrap().to_string();
+    let (code, v, err) = run_in(&f, f.dir.path(), &["clone", &url, "victim-clone", "--branch", "dev"]);
+    assert_eq!(code, 2, "{err}\n{:#?}", rules(&v));
+    assert!(has(&v, "t4.agent.command", "critical", false), "{:#?}", rules(&v));
+    let dir = f.dir.path().join("victim-clone");
+    assert!(dir.join(".git").is_dir(), "objects should be there for inspection");
+    assert!(!dir.join(".claude").exists() && !dir.join("README.md").exists(), "files were written");
+    assert!(err.contains("without a checkout"), "{err}");
+    assert!(!f.marker_exists());
+}
+
+#[test]
+fn clone_of_clean_repo_checks_out_and_records_the_tip() {
+    let f = fx::clean_fast_forward();
+    let url = f.origin.to_str().unwrap().to_string();
+    let (code, v, err) = run_in(&f, f.dir.path(), &["clone", &url, "--branch", "dev"]);
+    assert!(code == 0 || code == 1, "{err}\n{:#?}", rules(&v));
+    let dir = f.dir.path().join("origin");
+    assert!(dir.join("app/views.py").is_file(), "{err}");
+    let out = shield(&f).current_dir(&dir).args(["trust", "list", "--json"]).output().unwrap();
+    let list: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(list["refs"]["refs/remotes/origin/dev"]["tip"].is_string(), "{list:#}");
+}
+
+#[test]
+fn checkout_scans_the_target_tree() {
+    let f = fx::agent_hook();
+    let home = fx::home(&f);
+    fx::git(&f.local, &home, &["fetch", "-q", "origin"]);
+    let before = head(&f);
+    let (code, v, err) = run_in(&f, &f.local, &["checkout", "origin/dev"]);
+    assert_eq!(code, 2, "{err}\n{:#?}", rules(&v));
+    assert_eq!(head(&f), before);
+    assert!(!f.local.join(".claude").exists());
+
+    // A clean remote-only branch: resolved like git's DWIM and switched to.
+    fx::git(&f.pusher, &home, &["checkout", "-q", "-b", "feature", "HEAD~1"]);
+    fx::write(&f.pusher, "docs/notes.md", "# notes\n");
+    fx::git(&f.pusher, &home, &["add", "-A"]);
+    fx::git(&f.pusher, &home, &["commit", "-q", "-m", "notes"]);
+    fx::git(&f.pusher, &home, &["push", "-q", "origin", "feature"]);
+    fx::git(&f.local, &home, &["fetch", "-q", "origin"]);
+    let (code, v, err) = run_in(&f, &f.local, &["checkout", "feature"]);
+    assert!(code == 0 || code == 1, "{err}\n{:#?}", rules(&v));
+    assert!(f.local.join("docs/notes.md").is_file());
+    assert!(!f.marker_exists());
+}
