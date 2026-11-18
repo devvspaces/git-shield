@@ -4,9 +4,6 @@ use crate::util::{EXEC_ASSET, REMOTE_EXEC, clip, parse_jsonc, refs_in, str_of};
 use serde_json::Value;
 use shield_core::{Detector, FileChange, Finding, Severity, Threat};
 
-/// Labels seen in public Contagious Interview / StoatWaffle samples.
-const DECOY_LABELS: &[&str] = &["eslint-check", "eslint check", "install-deps", "env-setup", "npm-install"];
-
 fn is_tasks_file(c: &FileChange) -> bool {
     let p = c.path.to_ascii_lowercase();
     p.ends_with(".vscode/tasks.json") || p.ends_with(".code-workspace")
@@ -99,7 +96,7 @@ fn analyse_task(task: &Value, index: usize, anchor: &str, out: &mut Vec<Finding>
 
     let exec_asset = cmdlines.iter().find(|l| EXEC_ASSET.is_match(l));
     let remote_exec = cmdlines.iter().find(|l| REMOTE_EXEC.is_match(l));
-    let decoy = DECOY_LABELS.iter().any(|d| label.eq_ignore_ascii_case(d));
+    let decoy = crate::signatures::is_decoy_label(&label);
     let cmd_display = cmdlines.first().map(|c| clip(c, 160)).unwrap_or_else(|| "(no command)".into());
 
     if run_on_open {

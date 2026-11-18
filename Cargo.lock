@@ -1979,6 +1979,7 @@ dependencies = [
  "infer",
  "jsonc-parser",
  "regex",
+ "serde",
  "serde_json",
  "shield-core",
  "toml",

@@ -1,0 +1,52 @@
+# Known indicators from public incident write-ups. Every entry names its
+# source. Add only what a published analysis (or a first-hand incident)
+# confirms; generic names that legitimate projects also use do not belong here
+# (disguised fonts, for example, are caught by content checks instead).
+#
+# severity: "low" | "medium" | "high" | "critical" (default "high").
+
+# Labels used by malicious VS Code tasks. Adds context to T1 findings.
+[[decoy_task_label]]
+value = "eslint-check"
+source = "incident:matador-2026-11-10"
+
+[[decoy_task_label]]
+value = "eslint check"
+source = "incident:matador-2026-11-10 (variant spelling)"
+
+# Paths written by known worms (glob, matched against the repo path).
+[[payload_path]]
+glob = ".github/workflows/shai-hulud-workflow.yml"
+campaign = "Shai-Hulud (Sep 2025)"
+severity = "critical"
+source = "https://www.wiz.io/es-es/blog/shai-hulud-npm-supply-chain-attack"
+
+[[payload_path]]
+glob = ".github/workflows/discussion.yaml"
+campaign = "Sha1-Hulud 2.0 (Nov 2025) self-hosted runner backdoor"
+severity = "medium"
+source = "https://cycode.com/?p=10893"
+
+# File names (any directory).
+[[payload_file]]
+name = "setup_bun.js"
+campaign = "Sha1-Hulud 2.0 (Nov 2025) preinstall stager"
+source = "https://safedep.io/shai-hulud-second-coming-supply-chain-attack"
+
+[[payload_file]]
+name = "bun_environment.js"
+campaign = "Sha1-Hulud 2.0 (Nov 2025) obfuscated payload"
+severity = "critical"
+source = "https://safedep.io/shai-hulud-second-coming-supply-chain-attack"
+
+# Strings that appear in malicious content (matched in added content).
+[[ioc_string]]
+value = "bb8ca5f6-4175-45d2-b042-fc9ebb8170b7"
+campaign = "Shai-Hulud (Sep 2025) exfiltration webhook"
+severity = "critical"
+source = "https://www.recordedfuture.com/blog/massive-malicious-npm-package-attack-threatens-software-supply-chains"
+
+[[ioc_string]]
+value = "SHA1HULUD"
+campaign = "Sha1-Hulud 2.0 (Nov 2025) runner name"
+source = "https://cycode.com/?p=10893"

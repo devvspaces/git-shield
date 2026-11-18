@@ -1,4 +1,4 @@
-use crate::{FileChange, Finding, ScanContext, Severity, Threat};
+use crate::{FileChange, Finding, ScanContext, Severity};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{BTreeSet, HashSet};
@@ -119,9 +119,10 @@ fn mark_transited(f: &mut Finding) {
 
 fn finalize(mut findings: Vec<Finding>) -> Vec<Finding> {
     // Drop generic "sensitive path" notes where a specific detector already reported.
+    let generic = |f: &Finding| f.rule == "path.sensitive";
     let specific: HashSet<(Option<String>, bool)> =
-        findings.iter().filter(|f| f.threat != Threat::Path).map(|f| (f.path.clone(), f.transited)).collect();
-    findings.retain(|f| f.threat != Threat::Path || !specific.contains(&(f.path.clone(), f.transited)));
+        findings.iter().filter(|f| !generic(f)).map(|f| (f.path.clone(), f.transited)).collect();
+    findings.retain(|f| !generic(f) || !specific.contains(&(f.path.clone(), f.transited)));
 
     // Dedupe identical ids (same rule/path/anchor reported twice).
     let mut seen = BTreeSet::new();
@@ -152,7 +153,7 @@ mod tests {
             true
         }
         fn scan_file(&self, c: &FileChange, out: &mut Vec<Finding>) {
-            out.push(Finding::new(Threat::T1, "test.always", Severity::Critical, "x").anchor(c.path.clone()));
+            out.push(Finding::new(crate::Threat::T1, "test.always", Severity::Critical, "x").anchor(c.path.clone()));
         }
     }
 

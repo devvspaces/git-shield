@@ -11,6 +11,7 @@ mod obfuscation;
 mod paths;
 mod provenance;
 mod shellenv;
+mod signatures;
 pub(crate) mod util;
 mod vscode;
 
@@ -36,6 +37,7 @@ pub fn builtin() -> Vec<Box<dyn Detector>> {
         Box::new(shellenv::ShellEnv),
         Box::new(ci::Ci),
         Box::new(obfuscation::Obfuscation),
+        Box::new(signatures::KnownIoc),
         // Context steps: correlation over the file findings above.
         Box::new(obfuscation::PayloadWired),
         Box::new(provenance::RefRewritten),
