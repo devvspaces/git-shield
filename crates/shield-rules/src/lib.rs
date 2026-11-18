@@ -7,6 +7,7 @@ mod gitconfig;
 mod gitmeta;
 mod lifecycle;
 mod noise;
+mod obfuscation;
 mod paths;
 mod provenance;
 mod shellenv;
@@ -34,6 +35,9 @@ pub fn builtin() -> Vec<Box<dyn Detector>> {
         Box::new(lifecycle::Lifecycle),
         Box::new(shellenv::ShellEnv),
         Box::new(ci::Ci),
+        Box::new(obfuscation::Obfuscation),
+        // Context steps: correlation over the file findings above.
+        Box::new(obfuscation::PayloadWired),
         Box::new(provenance::RefRewritten),
         Box::new(provenance::Impersonation),
         Box::new(provenance::TamperedPayload),

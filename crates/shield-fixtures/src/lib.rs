@@ -414,3 +414,13 @@ pub fn ci_secrets_dump() -> Fixture {
         "ci: add workflow",
     )
 }
+
+/// Contagious-Interview-style config: code appended far to the right of a
+/// normal-looking line.
+pub fn offscreen_payload() -> Fixture {
+    let hidden = format!(
+        "module.exports = {{ content: ['./src/**/*.{{js,ts}}'], theme: {{ extend: {{}} }} }};{}eval(Buffer.from('Y29uc29sZS5sb2coMSk=', 'base64').toString()); // inert fixture\n",
+        " ".repeat(220)
+    );
+    content_push(&[("tailwind.config.js", hidden)], "style: tailwind config")
+}

@@ -570,3 +570,19 @@ fn ci_secrets_dump_is_blocked() {
     assert_eq!(code, 2, "{:#?}", rules(&v));
     assert!(has(&v, "t9.workflow.secrets-dump", "critical", false), "{:#?}", rules(&v));
 }
+
+#[test]
+fn offscreen_payload_is_blocked() {
+    let f = fx::offscreen_payload();
+    let (code, v) = check_rules(&f);
+    assert_eq!(code, 2, "{:#?}", rules(&v));
+    assert!(has(&v, "t13.hidden-offscreen", "high", false), "{:#?}", rules(&v));
+    assert!(has(&v, "t13.decode-exec", "high", false), "{:#?}", rules(&v));
+}
+
+#[test]
+fn agent_hook_wires_the_disguised_payload() {
+    let f = fx::agent_hook();
+    let (_, v) = check_rules(&f);
+    assert!(has(&v, "t13.payload-wired", "critical", false), "{:#?}", rules(&v));
+}
