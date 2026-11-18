@@ -792,3 +792,41 @@ fn doctor_reports_risky_user_settings_without_changing_them() {
     assert!(warns.iter().any(|m| m.contains("safe.bareRepository")), "{warns:#?}");
     assert_eq!(std::fs::read_to_string(home.join(vs)).unwrap(), before, "doctor must not modify settings");
 }
+
+#[test]
+fn installed_shell_function_routes_git_pull_through_the_gate() {
+    let f = fx::agent_hook();
+    let rc = f.dir.path().join("rc.sh");
+    let out =
+        shield(&f).args(["install", "--shell", "bash", "--write", "--rc", rc.to_str().unwrap()]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    // Idempotent.
+    shield(&f).args(["install", "--shell", "bash", "--write", "--rc", rc.to_str().unwrap()]).output().unwrap();
+    let text = std::fs::read_to_string(&rc).unwrap();
+    assert_eq!(text.matches(">>> git-shield >>>").count(), 1, "{text}");
+
+    // A plain `git pull --ff-only` in a shell that sourced the rc is gated.
+    let bin = assert_cmd::cargo::cargo_bin("git-shield");
+    let path = format!("{}:{}", bin.parent().unwrap().display(), std::env::var("PATH").unwrap());
+    let before = head(&f);
+    let status = std::process::Command::new("bash")
+        .current_dir(&f.local)
+        .env("PATH", path)
+        .env("HOME", fx::home(&f))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_SHIELD_HOME", shield_home(&f))
+        .env("GIT_SHIELD_CONFIG", f.dir.path().join("no-config.toml"))
+        .args(["-c", &format!(". {} && git pull --ff-only", rc.display())])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(status.status.code(), Some(2), "{}", String::from_utf8_lossy(&status.stderr));
+    assert_eq!(head(&f), before, "git pull was not gated");
+    assert!(!f.local.join(".claude").exists());
+
+    let out = shield(&f).args(["uninstall", "--shell", "bash", "--rc", rc.to_str().unwrap()]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!std::fs::read_to_string(&rc).unwrap().contains("git-shield"));
+    assert!(!f.marker_exists());
+}

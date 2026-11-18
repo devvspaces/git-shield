@@ -192,3 +192,8 @@ Each phase ends with: green `cargo test` + `cargo clippy -D warnings`, the PROGR
   - Allowlist rules in [ADR 0005](adr/0005-user-allowlist.md): Critical findings need a pinned `blob`. JSON output gains `accepted`.
   - Reflog-based rewrite detection only reads remote-tracking refs. Local branch reflogs are the user's own amends and rebases.
   - The FP run uses shallow `--no-checkout` clones, because gix does not fetch promisor (blobless) objects on demand.
+- **2026-11-18 (session 5):** Phase 5 (most of it). Changes to the plan:
+  - The `reference-transaction` hook is dropped. Tested: git writes the working tree before the hook can reject the ref update ([ADR 0006](adr/0006-shell-function-not-reference-transaction-hook.md)). `install` adds a `git pull` → `git shield pull` shell function instead.
+  - `audit` scans files on disk (not only `.git/config`). Symlinks are never followed, and dependency and build directories are skipped.
+  - `clone` populates the working tree with `reset --hard <scanned sha>` after a no-checkout clone.
+  - Full GPG/SSH signature verification is postponed to the Phase 4 remainder, next to GitHub's `verification` status.

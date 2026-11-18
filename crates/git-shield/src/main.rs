@@ -5,6 +5,7 @@
 mod audit;
 mod config;
 mod doctor;
+mod install;
 mod worktree;
 
 use anyhow::{Context, Result, bail};
@@ -68,6 +69,12 @@ enum Command {
         /// Why the accepted findings are fine (stored with them).
         #[arg(long, value_name = "TEXT")]
         reason: Option<String>,
+        /// Accepted for `git pull` compatibility (fast-forward is already the default).
+        #[arg(long, hide = true)]
+        ff_only: bool,
+        /// Accepted for `git pull` compatibility.
+        #[arg(long, hide = true)]
+        no_rebase: bool,
         #[command(flatten)]
         common: Common,
     },
@@ -119,6 +126,26 @@ enum Command {
     Doctor {
         #[arg(long)]
         json: bool,
+    },
+    /// Make a plain `git pull` run `git shield pull` (a shell function).
+    /// Prints the snippet; `--write` adds it to your shell rc between markers.
+    Install {
+        /// Shell to target (zsh, bash, fish); default from $SHELL.
+        #[arg(long)]
+        shell: Option<String>,
+        /// File to edit instead of the shell's default rc file.
+        #[arg(long, value_name = "FILE")]
+        rc: Option<PathBuf>,
+        /// Actually edit the rc file.
+        #[arg(long)]
+        write: bool,
+    },
+    /// Remove the block added by `install --write`.
+    Uninstall {
+        #[arg(long)]
+        shell: Option<String>,
+        #[arg(long, value_name = "FILE")]
+        rc: Option<PathBuf>,
     },
     /// Show where the user config (allowlist) lives, and validate it.
     Config {
@@ -282,10 +309,12 @@ fn run(cli: Cli) -> Result<u8> {
             let report = scan(&ctx);
             Ok(emit(&report, &accepted(&common, Some(&store), &report, Some(&repo))?, &common))
         }
-        Command::Pull { target, rebase, merge, reason, common } => pull(target, rebase, merge, reason, common),
+        Command::Pull { target, rebase, merge, reason, common, .. } => pull(target, rebase, merge, reason, common),
         Command::Trust { action } => trust(action),
         Command::Audit { path, rev, common } => audit::run(path, rev, &common),
         Command::Doctor { json } => doctor::run(json),
+        Command::Install { shell, rc, write } => install::install(shell.as_deref(), rc, write),
+        Command::Uninstall { shell, rc } => install::uninstall(shell.as_deref(), rc),
         Command::Clone { url, dir, branch, reason, common } => {
             worktree::clone(&url, dir, branch.as_deref(), reason, &common)
         }
