@@ -1,5 +1,6 @@
 //! Built-in detectors. One module per threat family; see `docs/THREATS.md`.
 
+mod agents;
 mod assets;
 mod gitconfig;
 mod gitmeta;
@@ -10,6 +11,7 @@ pub(crate) mod util;
 mod vscode;
 
 use shield_core::Detector;
+pub use util::glob_match;
 
 /// All built-in detectors. Context detectors run in this order; the
 /// correlation step (`TamperedPayload`) must stay last.
@@ -24,6 +26,8 @@ pub fn builtin() -> Vec<Box<dyn Detector>> {
         Box::new(noise::NoiseMasking),
         Box::new(paths::SensitivePaths),
         Box::new(paths::ModeChanges),
+        Box::new(agents::AgentConfig),
+        Box::new(agents::AgentInstructions),
         Box::new(provenance::RefRewritten),
         Box::new(provenance::Impersonation),
         Box::new(provenance::TamperedPayload),

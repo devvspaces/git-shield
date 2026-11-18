@@ -1,26 +1,8 @@
 //! T1: auto-running editor tasks. T3: editor settings that enable execution.
 
-use crate::util::{clip, parse_jsonc, str_of};
-use regex::Regex;
+use crate::util::{EXEC_ASSET, REMOTE_EXEC, clip, parse_jsonc, refs_in, str_of};
 use serde_json::Value;
 use shield_core::{Detector, FileChange, Finding, Severity, Threat};
-use std::sync::LazyLock;
-
-/// Interpreter invoked on a file whose extension is not a script.
-static EXEC_ASSET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?i)\b(node|nodejs|deno|bun|python[0-9.]*|py|bash|sh|zsh|ruby|perl|php|pwsh|powershell|osascript|wscript|cscript)(\.exe)?\b[^|;&]*?[\w./\\-]+\.(ttf|otf|woff2?|eot|svg|png|jpe?g|gif|ico|webp|bmp|css|scss|txt|md|json|lock|map|mp3|mp4|wav|pdf|csv|log|dat|bin)\b"#,
-    )
-    .unwrap()
-});
-
-/// Download-and-execute or encoded execution.
-static REMOTE_EXEC: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?i)((curl|wget|iwr|invoke-webrequest|invoke-restmethod|irm)\b[^\n]*\|\s*(sudo\s+)?(sh|bash|zsh|node|python[0-9.]*|iex|invoke-expression)\b)|(\b(base64\s+(-d|--decode)|frombase64string|atob\()|(-enc(odedcommand)?\s+[A-Za-z0-9+/=]{20,})|\beval\s*\()"#,
-    )
-    .unwrap()
-});
 
 /// Labels seen in public Contagious Interview / StoatWaffle samples.
 const DECOY_LABELS: &[&str] = &["eslint-check", "eslint check", "install-deps", "env-setup", "npm-install"];
@@ -130,6 +112,7 @@ fn analyse_task(task: &Value, index: usize, anchor: &str, out: &mut Vec<Finding>
             format!("Task `{label}` runs automatically when the folder is opened"),
         )
         .anchor(format!("{anchor}:{index}"))
+        .refs(cmdlines.iter().flat_map(|l| refs_in(l)))
         .detail(format!("command: {cmd_display}"));
         if !hidden.is_empty() {
             f = f.detail(format!("hidden from the user: {}", hidden.join(", ")));
@@ -153,6 +136,7 @@ fn analyse_task(task: &Value, index: usize, anchor: &str, out: &mut Vec<Finding>
                 format!("Task `{label}` executes a disguised or remote payload"),
             )
             .anchor(format!("{anchor}:{index}"))
+            .refs(refs_in(l))
             .detail(format!("command: {}", clip(l, 160))),
         );
     }
@@ -208,6 +192,17 @@ impl Detector for Settings {
                         "This lets folderOpen tasks run without a prompt. Malicious repos set it alongside tasks.json.",
                     ),
                 );
+            } else if AGENT_AUTO_APPROVE.contains(&k.as_str()) && value != &Value::Bool(false) && !value.is_null() {
+                out.push(
+                    Finding::new(
+                        Threat::T4,
+                        "t4.vscode.auto-approve",
+                        Severity::High,
+                        "Workspace lets the editor's AI agent run tools without asking",
+                    )
+                    .anchor(anchor)
+                    .detail(format!("{key} = {shown}")),
+                );
             } else if k.starts_with("security.workspace.trust") {
                 out.push(
                     Finding::new(
@@ -250,6 +245,15 @@ impl Detector for Settings {
         }
     }
 }
+
+/// Settings that make Copilot / VS Code agents run tools and terminal commands unprompted.
+const AGENT_AUTO_APPROVE: &[&str] = &[
+    "chat.tools.autoapprove",
+    "chat.tools.global.autoapprove",
+    "chat.tools.terminal.autoapprove",
+    "chat.agent.autoapprove",
+    "github.copilot.chat.agent.autoapprove",
+];
 
 fn is_exec_path_key(k: &str) -> bool {
     k.ends_with(".path")
@@ -323,6 +327,13 @@ mod tests {
         let f = scan(&Settings, &added(".vscode/settings.json", s.as_bytes()));
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn agent_auto_approve() {
+        let s = r#"{"chat.tools.autoApprove": true}"#;
+        let f = scan(&Settings, &added(".vscode/settings.json", s.as_bytes()));
+        assert_eq!(f[0].rule, "t4.vscode.auto-approve");
     }
 
     #[test]

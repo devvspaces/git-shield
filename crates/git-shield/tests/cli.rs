@@ -536,3 +536,21 @@ fn github_events_before_the_last_pull_are_not_repeated() {
     assert!(finding(&v, "t10.ref-rewritten").is_none(), "{err}\n{:#?}", rules(&v));
     assert!(!f.marker_exists());
 }
+
+// ---- Phase 3 content fixtures ----
+
+fn check_rules(f: &Fixture) -> (i32, Value) {
+    let (code, v) = json_check(f, &[]);
+    assert!(!f.marker_exists(), "payload executed!");
+    (code, v)
+}
+
+#[test]
+fn agent_hook_worm_is_blocked() {
+    let f = fx::agent_hook();
+    let (code, v) = check_rules(&f);
+    assert_eq!(code, 2, "{:#?}", rules(&v));
+    assert!(has(&v, "t4.agent.command", "critical", false), "{:#?}", rules(&v));
+    assert!(has(&v, "t4.claude.mcp-auto-approve", "high", false), "{:#?}", rules(&v));
+    assert!(has(&v, "t4.mcp.server", "critical", false), "{:#?}", rules(&v));
+}

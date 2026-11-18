@@ -142,6 +142,9 @@ pub struct Finding {
     /// Original severity when the engine lowered it (transited content).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capped_from: Option<Severity>,
+    /// Repository paths this finding's command executes or loads (not part of the id).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<String>,
 }
 
 impl Finding {
@@ -158,7 +161,14 @@ impl Finding {
             details: Vec::new(),
             transited: false,
             capped_from: None,
+            refs: Vec::new(),
         }
+    }
+
+    /// Record repository paths the finding's command references.
+    pub fn refs(mut self, refs: impl IntoIterator<Item = String>) -> Self {
+        self.refs.extend(refs);
+        self
     }
 
     pub fn path(mut self, path: impl Into<String>) -> Self {
