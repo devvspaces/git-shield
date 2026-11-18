@@ -140,6 +140,8 @@ pub enum TipSource {
     TrustStore,
     /// Passed explicitly (`scan --previous-tip`).
     Given,
+    /// The `before` of a force-push in GitHub's activity log.
+    GitHub,
 }
 
 impl TipSource {
@@ -149,6 +151,7 @@ impl TipSource {
             TipSource::Reflog => "recorded in the reflog",
             TipSource::TrustStore => "last pulled through git-shield",
             TipSource::Given => "given with --previous-tip",
+            TipSource::GitHub => "replaced by a force-push on GitHub",
         }
     }
 }
@@ -162,6 +165,23 @@ pub struct Rewrite {
     pub lost: Vec<CommitInfo>,
     /// True if `lost` was cut at the cap.
     pub lost_truncated: bool,
+    /// The old tip's objects are not available locally, so `lost` is unknown
+    /// (only possible for tips learned from GitHub).
+    pub missing: bool,
+    /// The force-push that replaced `old_tip`, if GitHub reported it.
+    pub push: Option<ForcePushInfo>,
+}
+
+/// A force-push as recorded by GitHub's activity log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForcePushInfo {
+    /// GitHub login of the pusher.
+    pub by: String,
+    /// Unix seconds.
+    pub at: i64,
+    /// The pushed (rewritten) tip is already in the local branch: the user
+    /// pulled it before git-shield was watching. Reported, but not blocking.
+    pub already_in_head: bool,
 }
 
 /// History facts used by the T10/T11 detectors.

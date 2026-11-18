@@ -305,3 +305,56 @@ pub fn matador_incident_with(opts: IncidentOpts) -> Fixture {
 
     finish(dir, origin, local)
 }
+
+/// A tiny HTTP/1.1 server answering canned responses by exact path (query
+/// ignored), standing in for the GitHub API. Counts requests in `hits`.
+pub struct FakeGitHub {
+    pub url: String,
+    pub hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// `routes`: (path, status, JSON body). Unknown paths get 404.
+pub fn fake_github(routes: Vec<(&'static str, u16, String)>) -> FakeGitHub {
+    use std::io::{BufRead, BufReader, Write as _};
+    use std::sync::atomic::Ordering;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = hits.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            counter.fetch_add(1, Ordering::SeqCst);
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            // Drain headers.
+            let mut h = String::new();
+            while reader.read_line(&mut h).is_ok_and(|n| n > 2) {
+                h.clear();
+            }
+            let target = line.split_whitespace().nth(1).unwrap_or("");
+            let path = target.split('?').next().unwrap_or("");
+            let (status, body) = routes
+                .iter()
+                .find(|(p, _, _)| *p == path)
+                .map(|(_, s, b)| (*s, b.clone()))
+                .unwrap_or((404, "{\"message\":\"Not Found\"}".into()));
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    FakeGitHub { url, hits }
+}
+
+/// One activity-log entry as GitHub returns it.
+pub fn force_push_json(before: &str, after: &str, actor: &str, timestamp: &str) -> String {
+    format!(
+        r#"{{"id":1,"before":"{before}","after":"{after}","ref":"refs/heads/dev","timestamp":"{timestamp}","activity_type":"force_push","actor":{{"login":"{actor}"}}}}"#
+    )
+}

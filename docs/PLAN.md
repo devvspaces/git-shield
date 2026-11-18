@@ -184,3 +184,4 @@ Each phase ends with: green `cargo test` + `cargo clippy -D warnings`, the PROGR
   - Reflog transitions made by the user's own `git push` never count as rewrites (restores, own rebases).
   - Added `scan --previous-tip <REV>` for forensics. It replays "I had X before" without a reflog, which is how the real 2026-11-10 incident was re-verified.
   - The report groups a rule with 4 or more findings at Medium or below into one block. This is display only; ids and JSON are unchanged.
+- **2026-11-18 (session 3):** The GitHub activity-API slice of Phase 4 (force-push history and actors) was built early ([ADR 0004](adr/0004-github-force-push-history.md)). It closes the "old rewrite without local memory" gap. Commit verification and PR merge-SHA matching stay in Phase 4. Also added `git shield trust list/forget`, and `t11.merge-not-by-github` is grouped per committer.

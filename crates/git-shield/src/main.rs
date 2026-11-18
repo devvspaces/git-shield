@@ -4,10 +4,10 @@
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use shield_core::{Report, ScanContext, Severity, TipSource};
+use shield_core::{ForcePushInfo, Report, ScanContext, Severity, TipSource};
 use shield_git::trust::TrustStore;
 use shield_git::{GitRepo, ObjectId, ProvenanceInput, hardened::HardenedGit};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -30,6 +30,9 @@ enum Command {
         /// A tip you had before (repeatable). Reports a rewrite if the range end no longer contains it.
         #[arg(long, value_name = "REV")]
         previous_tip: Vec<String>,
+        /// Also look up the branch's force-push history on GitHub (network).
+        #[arg(long)]
+        github: bool,
         #[command(flatten)]
         common: Common,
     },
@@ -105,6 +108,9 @@ struct Target {
     /// Run git even if the local git config contains settings that execute programs.
     #[arg(long)]
     allow_unsafe_config: bool,
+    /// Skip the GitHub force-push history lookup (stay offline after the fetch).
+    #[arg(long)]
+    no_github: bool,
 }
 
 #[derive(Args)]
@@ -124,6 +130,9 @@ struct Common {
     /// Disable colored output.
     #[arg(long)]
     no_color: bool,
+    /// GitHub repository to query, when the remote URL does not say (e.g. an SSH host alias).
+    #[arg(long, value_name = "OWNER/NAME")]
+    github_repo: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -143,15 +152,36 @@ fn now() -> i64 {
 
 fn run(cli: Cli) -> Result<u8> {
     match cli.command {
-        Command::Scan { range, previous_tip, common } => {
+        Command::Scan { range, previous_tip, github, common } => {
             let repo = GitRepo::discover(&common.repo)?;
             let store = TrustStore::open(&repo)?;
             let (from, to, b, label) = resolve_range(&repo, range.as_deref())?;
             let given =
                 previous_tip.iter().map(|r| Ok((repo.resolve(r)?, TipSource::Given))).collect::<Result<Vec<_>>>()?;
+            let full = repo.full_ref_name(&b);
+            let mut gh = KnownTips::default();
+            if github {
+                match full.as_deref().and_then(|r| r.strip_prefix("refs/remotes/")).and_then(|r| r.split_once('/')) {
+                    Some((remote, branch)) => {
+                        gh = github_tips(
+                            &repo,
+                            &store,
+                            full.as_deref().unwrap(),
+                            remote,
+                            branch,
+                            to,
+                            Some(from),
+                            false,
+                            &common,
+                        );
+                    }
+                    None => note(&format!("--github needs the range to end at a remote-tracking ref (got `{b}`)")),
+                }
+            }
+            gh.tips.splice(0..0, given);
             // Provenance needs a ref; with only --previous-tip, use the range end itself.
-            let ref_name = repo.full_ref_name(&b).or_else(|| (!given.is_empty()).then(|| b.clone()));
-            let ctx = build_context(&repo, &store, from, to, label, ref_name.as_deref(), &given)?;
+            let ref_name = full.or_else(|| (!gh.tips.is_empty()).then(|| b.clone()));
+            let ctx = build_context(&repo, &store, from, to, label, ref_name.as_deref(), &gh)?;
             let report = scan(&ctx);
             Ok(emit(&report, &accepted(&common, &store), &common))
         }
@@ -168,11 +198,26 @@ fn run(cli: Cli) -> Result<u8> {
             // Re-open so refs updated by the fetch are visible.
             let repo = GitRepo::discover(&common.repo)?;
             let store = TrustStore::open(&repo)?;
-            let from = repo.resolve("HEAD")?;
             let to = repo.resolve(&tracking).with_context(|| format!("remote-tracking ref {tracking} not found"))?;
-            let extra: Vec<_> = prefetch.map(|p| (p, TipSource::PreFetch)).into_iter().collect();
-            let ctx =
-                build_context(&repo, &store, from, to, format!("HEAD..{remote}/{branch}"), Some(&tracking), &extra)?;
+            let mut gh = if target.no_github {
+                KnownTips::default()
+            } else {
+                github_tips(
+                    &repo,
+                    &store,
+                    &tracking,
+                    &remote,
+                    &branch,
+                    to,
+                    repo.resolve("HEAD").ok(),
+                    !no_fetch,
+                    &common,
+                )
+            };
+            gh.tips.splice(0..0, prefetch.map(|p| (p, TipSource::PreFetch)));
+            let repo = if gh.fetched { GitRepo::discover(&common.repo)? } else { repo };
+            let from = repo.resolve("HEAD")?;
+            let ctx = build_context(&repo, &store, from, to, format!("HEAD..{remote}/{branch}"), Some(&tracking), &gh)?;
             Ok(emit(&scan(&ctx), &accepted(&common, &store), &common))
         }
         Command::Pull { target, rebase, merge, reason, common } => pull(target, rebase, merge, reason, common),
@@ -249,19 +294,8 @@ fn display_ref(name: &str) -> &str {
     name.strip_prefix("refs/remotes/").or_else(|| name.strip_prefix("refs/heads/")).unwrap_or(name)
 }
 
-/// `YYYY-MM-DD` (UTC) from unix seconds.
 fn date(secs: i64) -> String {
-    // Civil-from-days (Howard Hinnant), avoiding a date crate for one line of output.
-    let z = secs.div_euclid(86_400) + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02}")
+    shield_core::utc_date(secs)
 }
 
 fn pull(target: Target, rebase: bool, merge: bool, reason: Option<String>, common: Common) -> Result<u8> {
@@ -275,10 +309,16 @@ fn pull(target: Target, rebase: bool, merge: bool, reason: Option<String>, commo
 
     let repo = GitRepo::discover(&common.repo)?;
     let mut store = TrustStore::open(&repo)?;
-    let head = repo.resolve("HEAD")?;
     let tip = repo.resolve(&tracking).with_context(|| format!("remote-tracking ref {tracking} not found"))?;
-    let extra: Vec<_> = prefetch.map(|p| (p, TipSource::PreFetch)).into_iter().collect();
-    let ctx = build_context(&repo, &store, head, tip, format!("HEAD..{remote}/{branch}"), Some(&tracking), &extra)?;
+    let mut gh = if target.no_github {
+        KnownTips::default()
+    } else {
+        github_tips(&repo, &store, &tracking, &remote, &branch, tip, repo.resolve("HEAD").ok(), true, &common)
+    };
+    gh.tips.splice(0..0, prefetch.map(|p| (p, TipSource::PreFetch)));
+    let repo = if gh.fetched { GitRepo::discover(&common.repo)? } else { repo };
+    let head = repo.resolve("HEAD")?;
+    let ctx = build_context(&repo, &store, head, tip, format!("HEAD..{remote}/{branch}"), Some(&tracking), &gh)?;
     let report = scan(&ctx);
     let mut accepted = accepted(&common, &store);
     emit(&report, &accepted, &common);
@@ -395,12 +435,12 @@ fn build_context(
     to: ObjectId,
     label: String,
     ref_name: Option<&str>,
-    known_tips: &[(ObjectId, TipSource)],
+    known: &KnownTips,
 ) -> Result<ScanContext> {
     let mut ctx = repo.incoming(from, to, label)?;
     let Some(ref_name) = ref_name else { return Ok(ctx) };
     let t = now();
-    let mut extra = known_tips.to_vec();
+    let mut extra = known.tips.clone();
     let trusted = store.trusted_tip(ref_name);
     if let Some(tt) = trusted
         && let Ok(oid) = ObjectId::from_hex(tt.tip.as_bytes())
@@ -414,11 +454,127 @@ fn build_context(
         base,
         commits: &ctx.commits,
         extra: &extra,
+        pushers: &known.pushers,
         reflog_since: trusted.map_or(t - shield_git::REFLOG_WINDOW_SECS, |tt| tt.at),
         now: t,
     };
     ctx.provenance = Some(repo.provenance(&input)?);
     Ok(ctx)
+}
+
+/// Previous tips of the scanned ref known from outside its reflog.
+#[derive(Default)]
+struct KnownTips {
+    tips: Vec<(ObjectId, TipSource)>,
+    /// Replaced tip → the force-push that replaced it.
+    pushers: HashMap<ObjectId, ForcePushInfo>,
+    /// Missing objects were fetched; re-open the repository to see them.
+    fetched: bool,
+}
+
+/// At most this many replaced tips are fetched by SHA when missing locally.
+const MAX_SHA_FETCHES: usize = 5;
+
+fn note(msg: &str) {
+    eprintln!("git-shield: note: {msg}");
+}
+
+/// Ask GitHub which force-pushes `branch` went through, and keep those that
+/// still matter for `new_tip`: pushed by someone other than the token's owner,
+/// after the last pull recorded in the trust store, and whose result is still
+/// part of the history being pulled. Never fails: problems become notes.
+#[allow(clippy::too_many_arguments)]
+fn github_tips(
+    repo: &GitRepo,
+    store: &TrustStore,
+    ref_name: &str,
+    remote: &str,
+    branch: &str,
+    new_tip: ObjectId,
+    head: Option<ObjectId>,
+    fetch_missing: bool,
+    common: &Common,
+) -> KnownTips {
+    let mut out = KnownTips::default();
+    let slug = match &common.github_repo {
+        Some(s) => match shield_github::parse_slug(s) {
+            Some(x) => x,
+            None => {
+                note(&format!("--github-repo expects OWNER/NAME, got `{s}`"));
+                return out;
+            }
+        },
+        // Not a GitHub remote: nothing to ask, nothing to say.
+        None => match repo.remote_url(remote).as_deref().and_then(shield_github::repo_slug) {
+            Some(x) => x,
+            None => return out,
+        },
+    };
+    let fail = |e: String| note(&format!("{e}; force-push history not checked"));
+    let client = match shield_github::Client::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            note(&e);
+            return out;
+        }
+    };
+    let viewer = match client.viewer() {
+        Ok(v) => v,
+        Err(e) => {
+            fail(e);
+            return out;
+        }
+    };
+    let events = match client.force_pushes(&slug.0, &slug.1, branch) {
+        Ok(v) => v,
+        Err(e) => {
+            fail(e);
+            return out;
+        }
+    };
+    let since = store.trusted_tip(ref_name).map(|t| t.at);
+    let mut to_fetch = Vec::new();
+    for e in events {
+        // The user's own force-pushes (e.g. restoring the branch) are deliberate.
+        if e.actor.eq_ignore_ascii_case(&viewer) || since.is_some_and(|s| e.at <= s) {
+            continue;
+        }
+        let (Ok(before), Ok(after)) = (ObjectId::from_hex(e.before.as_bytes()), ObjectId::from_hex(e.after.as_bytes()))
+        else {
+            continue;
+        };
+        if before.is_null() {
+            continue;
+        }
+        let contains = |tip: ObjectId| after == tip || repo.is_ancestor(after, tip).unwrap_or(false);
+        // Only rewrites whose result is still in the history being pulled matter;
+        // later force-pushes that undid them are superseded.
+        let in_history = repo.has_object(after) && contains(new_tip);
+        let already_in_head = in_history && head.is_some_and(contains);
+        out.pushers.entry(before).or_insert(ForcePushInfo { by: e.actor.clone(), at: e.at, already_in_head });
+        if !in_history || out.tips.iter().any(|(t, _)| *t == before) {
+            continue;
+        }
+        if !repo.has_object(before) {
+            to_fetch.push(before);
+        }
+        out.tips.push((before, TipSource::GitHub));
+    }
+    if fetch_missing && !to_fetch.is_empty() {
+        let workdir = repo.workdir().unwrap_or_else(|| repo.git_dir().to_path_buf());
+        if let Ok(git) = HardenedGit::new(&workdir) {
+            for oid in to_fetch.iter().take(MAX_SHA_FETCHES) {
+                // GitHub serves commits by full id even after a force-push.
+                if git.fetch(remote, Some(&oid.to_string())).is_ok() {
+                    out.fetched = true;
+                }
+            }
+        }
+    }
+    if !common.json && !out.tips.is_empty() {
+        eprintln!("git-shield: GitHub reports {} force-push(es) still in this history.", out.tips.len());
+    }
+    out
 }
 
 fn scan(ctx: &ScanContext) -> Report {

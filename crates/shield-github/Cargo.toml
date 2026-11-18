@@ -1,0 +1,18 @@
+[package]
+name = "shield-github"
+description = "Optional GitHub lookups for git-shield (force-push history)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+ureq = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -43,26 +43,50 @@ impl Detector for RefRewritten {
         let Some(p) = &ctx.provenance else { return };
         let tip = ctx.tip.as_deref().unwrap_or("");
         for rw in &p.rewrites {
+            let integrated = rw.push.as_ref().is_some_and(|x| x.already_in_head);
+            let (sev, suffix) =
+                if integrated { (Severity::Medium, " (already in your branch)") } else { (Severity::High, "") };
             let mut f = Finding::new(
                 Threat::T10,
                 "t10.ref-rewritten",
-                Severity::High,
+                sev,
                 format!(
-                    "`{}` was rewritten (force-push): {} is no longer in its history",
+                    "`{}` was rewritten (force-push): {} is no longer in its history{suffix}",
                     display_ref(&p.ref_name),
                     short(&rw.old_tip)
                 ),
             )
             .commit(tip)
-            .anchor(format!("{}..{}", rw.old_tip, tip))
+            // Stable across later pulls, so an acceptance keeps covering this rewrite.
+            .anchor(format!("rewrite:{}", rw.old_tip))
             .detail(format!("Previous tip {} ({}).", short(&rw.old_tip), rw.source.describe()));
-            let more = if rw.lost_truncated { "+" } else { "" };
-            f = f.detail(format!("{}{more} commit(s) dropped from the branch:", rw.lost.len()));
-            for c in rw.lost.iter().take(LIST_LIMIT) {
-                f = f.detail(format!("  {}  {}  ({})", short(&c.id), c.summary, c.author_name));
+            if let Some(push) = &rw.push {
+                f = f.detail(format!(
+                    "Force-pushed by @{} on {} (GitHub activity log).",
+                    push.by,
+                    shield_core::utc_datetime(push.at)
+                ));
+                if push.already_in_head {
+                    f = f.detail(
+                        "Your branch already contains the rewritten history (pulled before git-shield was \
+                         watching). Check that the dropped commits were restored and nothing was slipped in.",
+                    );
+                }
             }
-            if rw.lost.len() > LIST_LIMIT {
-                f = f.detail(format!("  … and {} more", rw.lost.len() - LIST_LIMIT));
+            if rw.missing {
+                f = f.detail(format!(
+                    "The replaced commits are not available locally; inspect them on GitHub (commit {}).",
+                    rw.old_tip
+                ));
+            } else {
+                let more = if rw.lost_truncated { "+" } else { "" };
+                f = f.detail(format!("{}{more} commit(s) dropped from the branch:", rw.lost.len()));
+                for c in rw.lost.iter().take(LIST_LIMIT) {
+                    f = f.detail(format!("  {}  {}  ({})", short(&c.id), c.summary, c.author_name));
+                }
+                if rw.lost.len() > LIST_LIMIT {
+                    f = f.detail(format!("  … and {} more", rw.lost.len() - LIST_LIMIT));
+                }
             }
             out.push(f.detail(
                 "Confirm with whoever owns the branch before pulling. On GitHub: repository → Activity → force pushes.",
@@ -95,10 +119,11 @@ impl Detector for Impersonation {
 /// metadata" force-push. Returns the ids of the copies it reported.
 fn rewritten_copies(ctx: &ScanContext, p: &shield_core::Provenance, out: &mut Vec<Finding>) -> HashSet<String> {
     let mut reported = HashSet::new();
-    let mut lost: HashMap<(&str, String, i64), &CommitInfo> = HashMap::new();
+    let mut lost: HashMap<(&str, String, i64), (&CommitInfo, Option<&str>)> = HashMap::new();
     for rw in &p.rewrites {
         for c in &rw.lost {
-            lost.entry((c.summary.as_str(), c.author_email.to_ascii_lowercase(), c.author_time)).or_insert(c);
+            lost.entry((c.summary.as_str(), c.author_email.to_ascii_lowercase(), c.author_time))
+                .or_insert((c, rw.push.as_ref().map(|x| x.by.as_str())));
         }
     }
     if lost.is_empty() {
@@ -106,7 +131,7 @@ fn rewritten_copies(ctx: &ScanContext, p: &shield_core::Provenance, out: &mut Ve
     }
     for copy in &ctx.commits {
         let k = (copy.summary.as_str(), copy.author_email.to_ascii_lowercase(), copy.author_time);
-        let Some(orig) = lost.get(&k) else { continue };
+        let Some(&(orig, pushed_by)) = lost.get(&k) else { continue };
         if orig.id == copy.id {
             continue;
         }
@@ -154,6 +179,9 @@ fn rewritten_copies(ctx: &ScanContext, p: &shield_core::Provenance, out: &mut Ve
         }
         if orig.parents != copy.parents {
             f = f.detail("Parents differ from the original.");
+        }
+        if let Some(by) = pushed_by {
+            f = f.detail(format!("The rewrite was force-pushed by @{by}."));
         }
         reported.insert(copy.id.clone());
         out.push(f);
@@ -357,6 +385,8 @@ mod tests {
                 source: TipSource::PreFetch,
                 lost,
                 lost_truncated: false,
+                missing: false,
+                push: None,
             });
         }
         p.parent_times.insert("p".repeat(40), 1900);

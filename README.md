@@ -30,7 +30,7 @@ BLOCKED: 4 finding(s) at high or above  (3 critical, 1 high, 4 medium, 1 low, 2 
 git-shield: pull blocked; nothing was merged.
 ```
 
-> Status: **early development (Phase 2 done)**. `scan`, `check` and the `pull` gate work offline; deep content detectors (AI-agent configs, lifecycle scripts) are next. See [docs/PROGRESS.md](docs/PROGRESS.md).
+> Status: **early development (Phase 2 done)**. `scan`, `check` and the `pull` gate work offline, with an optional GitHub force-push lookup; deep content detectors (AI-agent configs, lifecycle scripts) are next. See [docs/PROGRESS.md](docs/PROGRESS.md).
 
 ## What it detects
 
@@ -42,8 +42,8 @@ git-shield: pull blocked; nothing was merged.
 | Submodules / attributes | URL swaps, `ext::`, `update=!cmd`, custom drivers |
 | Noise masking | CRLF/whitespace churn hiding small real changes |
 | History in transit | payloads added then removed in intermediate commits |
-| Force-push / impersonation | a branch that dropped commits you had, unsigned copies of signed merges, "Merge pull request" commits not made by GitHub, odd timezones and dates |
-| *Coming* | AI-agent configs, lifecycle scripts, devcontainers/CI, obfuscation, GitHub provenance |
+| Force-push / impersonation | a branch that dropped commits you had (or that GitHub logged as force-pushed by someone else), unsigned copies of signed merges, "Merge pull request" commits not made by GitHub, odd timezones and dates |
+| *Coming* | AI-agent configs, lifecycle scripts, devcontainers/CI, obfuscation, GitHub commit verification |
 
 Full list with sources: [docs/THREATS.md](docs/THREATS.md).
 
@@ -64,7 +64,10 @@ git shield scan HEAD..origin/dev    # offline scan of a local range (uses the re
 git shield scan A..B --previous-tip X   # forensics: "I had X before; was it rewritten away?"
 git shield check --json             # machine-readable
 git shield check --accept GS-T2-…   # mark a reviewed finding as accepted
+git shield trust list               # what this repo has accepted / last pulled tips
+git shield trust forget GS-T2-…     # un-accept (or --all, or --ref origin/dev)
 ```
+For GitHub remotes, `check` and `pull` also read the branch's force-push log, so a rewrite is caught even if this machine never saw the old tip. They use `GITHUB_TOKEN` or your `gh` login. The token is only sent to api.github.com. Use `--no-github` to skip this, or `scan --github` to add it to a local scan. Without a token it notes the skip and carries on.
 Exit codes: `0` clean · `1` warnings · `2` blocked · `3` error.
 
 ## How it stays safe

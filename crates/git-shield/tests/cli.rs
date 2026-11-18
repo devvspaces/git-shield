@@ -359,3 +359,180 @@ fn pull_refuses_checkout_time_config_drivers() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("refusing to run git"));
     assert!(!f.marker_exists());
 }
+
+// ---- GitHub force-push history (fake API) ----
+
+/// Victim plain-`git fetch`ed the incident and its reflog expired: offline,
+/// nothing remembers the real merge. Returns (fixture, real merge, forged tip).
+fn incident_without_local_memory() -> (Fixture, String, String) {
+    let f = fx::matador_incident_with(fx::IncidentOpts { font: false });
+    let home = fx::home(&f);
+    let real = fx::git(&f.local, &home, &["rev-parse", "origin/dev"]);
+    fx::git(&f.local, &home, &["fetch", "-q", "origin"]);
+    let forged = fx::git(&f.local, &home, &["rev-parse", "origin/dev^"]);
+    fx::git(&f.local, &home, &["reflog", "expire", "--expire=now", "--all"]);
+    (f, real, forged)
+}
+
+fn github(f: &Fixture, gh: &fx::FakeGitHub, args: &[&str]) -> (i32, Value, String) {
+    let out = shield(f)
+        .env("GIT_SHIELD_GITHUB_API", &gh.url)
+        .env("GITHUB_TOKEN", "test-token")
+        .args(["check", "--no-fetch", "--json", "--github-repo", "o/r"])
+        .args(args)
+        .output()
+        .unwrap();
+    let v = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+    (out.status.code().unwrap_or(-1), v, String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+fn activity(events: &[String]) -> (&'static str, u16, String) {
+    ("/repos/o/r/activity", 200, format!("[{}]", events.join(",")))
+}
+
+fn viewer(login: &str) -> (&'static str, u16, String) {
+    ("/user", 200, format!(r#"{{"login":"{login}"}}"#))
+}
+
+fn finding<'a>(v: &'a Value, rule: &str) -> Option<&'a Value> {
+    v["findings"].as_array()?.iter().find(|x| x["rule"] == rule)
+}
+
+#[test]
+fn offline_misses_the_rewrite_without_local_memory() {
+    let (f, _, _) = incident_without_local_memory();
+    let (code, v) = json_check(&f, &["--no-fetch"]);
+    assert_eq!(code, 1, "{:#?}", rules(&v));
+    assert!(finding(&v, "t10.ref-rewritten").is_none());
+}
+
+#[test]
+fn github_activity_reveals_an_old_force_push() {
+    let (f, real, forged) = incident_without_local_memory();
+    let gh = fx::fake_github(vec![
+        viewer("victim"),
+        activity(&[fx::force_push_json(&real, &forged, "mallory", "2026-08-01T10:00:00Z")]),
+    ]);
+    let (code, v, err) = github(&f, &gh, &[]);
+    assert_eq!(code, 2, "{err}\n{:#?}", rules(&v));
+    let rw = finding(&v, "t10.ref-rewritten").expect("rewrite");
+    assert_eq!(rw["severity"], "high");
+    assert!(rw["details"].to_string().contains("@mallory on 2026-08-01 10:00 UTC"), "{rw:#}");
+    let copy = finding(&v, "t11.rewritten-copy").expect("copy");
+    assert_eq!(copy["severity"], "critical");
+    assert!(copy["details"].to_string().contains("force-pushed by @mallory"), "{copy:#}");
+    assert!(!f.marker_exists());
+}
+
+#[test]
+fn own_force_push_is_not_a_rewrite() {
+    let (f, real, forged) = incident_without_local_memory();
+    let gh = fx::fake_github(vec![
+        viewer("Victim"),
+        activity(&[fx::force_push_json(&real, &forged, "victim", "2026-08-01T10:00:00Z")]),
+    ]);
+    let (code, v, err) = github(&f, &gh, &[]);
+    assert_eq!(code, 1, "{err}\n{:#?}", rules(&v));
+    assert!(finding(&v, "t10.ref-rewritten").is_none());
+}
+
+#[test]
+fn rewrite_already_in_your_branch_warns_only() {
+    let (f, real, _) = incident_without_local_memory();
+    let head = head(&f);
+    let gh = fx::fake_github(vec![
+        viewer("victim"),
+        activity(&[fx::force_push_json(&real, &head, "mallory", "2026-08-01T10:00:00Z")]),
+    ]);
+    let (_, v, err) = github(&f, &gh, &[]);
+    let rw = finding(&v, "t10.ref-rewritten").unwrap_or_else(|| panic!("{err}\n{:#?}", rules(&v)));
+    assert_eq!(rw["severity"], "medium");
+    assert!(rw["title"].as_str().unwrap().contains("already in your branch"));
+}
+
+#[test]
+fn unknown_replaced_tip_is_still_reported() {
+    let (f, _, forged) = incident_without_local_memory();
+    let ghost = "ab".repeat(20);
+    let gh = fx::fake_github(vec![
+        viewer("victim"),
+        activity(&[fx::force_push_json(&ghost, &forged, "mallory", "2026-08-01T10:00:00Z")]),
+    ]);
+    let (code, v, err) = github(&f, &gh, &[]);
+    assert_eq!(code, 2, "{err}\n{:#?}", rules(&v));
+    let rw = finding(&v, "t10.ref-rewritten").expect("rewrite");
+    assert!(rw["details"].to_string().contains("not available locally"), "{rw:#}");
+}
+
+#[test]
+fn github_errors_degrade_to_offline() {
+    let (f, _, _) = incident_without_local_memory();
+    let gh = fx::fake_github(vec![("/user", 500, r#"{"message":"boom"}"#.into())]);
+    let (code, v, err) = github(&f, &gh, &[]);
+    assert_eq!(code, 1, "{err}\n{:#?}", rules(&v));
+    assert!(err.contains("note: GitHub returned HTTP 500 boom"), "{err}");
+
+    // Unreachable API: same.
+    let out = shield(&f)
+        .env("GIT_SHIELD_GITHUB_API", "http://127.0.0.1:9")
+        .env("GITHUB_TOKEN", "t")
+        .args(["check", "--no-fetch", "--github-repo", "o/r"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("force-push history not checked"));
+}
+
+#[test]
+fn no_github_makes_no_requests() {
+    let (f, real, forged) = incident_without_local_memory();
+    let gh = fx::fake_github(vec![
+        viewer("victim"),
+        activity(&[fx::force_push_json(&real, &forged, "mallory", "2026-08-01T10:00:00Z")]),
+    ]);
+    let (code, _, err) = github(&f, &gh, &["--no-github"]);
+    assert_eq!(code, 1, "{err}");
+    assert_eq!(gh.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // `scan` stays offline unless asked.
+    let out = shield(&f)
+        .env("GIT_SHIELD_GITHUB_API", &gh.url)
+        .env("GITHUB_TOKEN", "t")
+        .args(["scan", "HEAD..origin/dev", "--github-repo", "o/r"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(gh.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // ...and uses it with --github.
+    let out = shield(&f)
+        .env("GIT_SHIELD_GITHUB_API", &gh.url)
+        .env("GITHUB_TOKEN", "t")
+        .args(["scan", "HEAD..origin/dev", "--github", "--github-repo", "o/r"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stdout));
+}
+
+#[test]
+fn github_events_before_the_last_pull_are_not_repeated() {
+    let (f, real, forged) = incident_without_local_memory();
+    let gh = fx::fake_github(vec![
+        viewer("victim"),
+        activity(&[fx::force_push_json(&real, &forged, "mallory", "2026-08-01T10:00:00Z")]),
+    ]);
+    let (_, v, _) = github(&f, &gh, &[]);
+    let ids = blocking_ids(&v);
+    let mut args = vec!["pull".to_string(), "--json".into(), "--github-repo".into(), "o/r".into()];
+    args.extend(accept_args(&ids));
+    let out = shield(&f)
+        .env("GIT_SHIELD_GITHUB_API", &gh.url)
+        .env("GITHUB_TOKEN", "test-token")
+        .args(&args)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(head(&f), origin_dev(&f));
+    // The trust store now records this pull; the old force-push is history.
+    let (_, v, err) = github(&f, &gh, &[]);
+    assert!(finding(&v, "t10.ref-rewritten").is_none(), "{err}\n{:#?}", rules(&v));
+    assert!(!f.marker_exists());
+}

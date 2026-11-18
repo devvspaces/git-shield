@@ -4,7 +4,7 @@
 
 use crate::{GitRepo, Result, git_err};
 use gix::hash::ObjectId;
-use shield_core::{CommitInfo, Provenance, Rewrite, TipSource};
+use shield_core::{CommitInfo, ForcePushInfo, Provenance, Rewrite, TipSource};
 use std::collections::HashMap;
 
 /// At most this many commits are listed as dropped by one rewrite.
@@ -27,6 +27,8 @@ pub struct ProvenanceInput<'a> {
     pub commits: &'a [CommitInfo],
     /// Known previous tips from outside the reflog (pre-fetch value, trust store).
     pub extra: &'a [(ObjectId, TipSource)],
+    /// Who force-pushed over a tip, and when (from GitHub's activity log).
+    pub pushers: &'a HashMap<ObjectId, ForcePushInfo>,
     /// Only reflog entries strictly after this time are considered (the
     /// trust-store record is written right after the fetch it covers).
     pub reflog_since: i64,
@@ -40,6 +42,16 @@ impl GitRepo {
         Some(r.name().as_bstr().to_string())
     }
 
+    pub fn has_object(&self, id: ObjectId) -> bool {
+        self.repo().has_object(id)
+    }
+
+    /// `remote.<name>.url` from the repository config.
+    pub fn remote_url(&self, remote: &str) -> Option<String> {
+        let cfg = self.repo().config_snapshot();
+        cfg.string(format!("remote.{remote}.url").as_str()).map(|s| s.to_string())
+    }
+
     /// Current target of a ref, peeled to a commit, if it exists.
     pub fn ref_tip(&self, name: &str) -> Option<ObjectId> {
         let mut r = self.repo().find_reference(name).ok()?;
@@ -50,10 +62,14 @@ impl GitRepo {
     pub fn provenance(&self, input: &ProvenanceInput<'_>) -> Result<Provenance> {
         let candidates = self.previous_tips(input)?;
 
-        // Previous tips the new tip no longer contains.
+        // Previous tips the new tip no longer contains. Tips known only from
+        // GitHub whose objects could not be fetched are reported as-is.
         let mut rewritten: Vec<(ObjectId, TipSource)> = Vec::new();
+        let mut missing: Vec<(ObjectId, TipSource)> = Vec::new();
         for (oid, src) in candidates {
-            if !self.is_ancestor(oid, input.new_tip)? {
+            if !self.repo().has_object(oid) {
+                missing.push((oid, src));
+            } else if !self.is_ancestor(oid, input.new_tip)? {
                 rewritten.push((oid, src));
             }
         }
@@ -72,7 +88,18 @@ impl GitRepo {
             }
         }
 
+        let pusher = |oid: &ObjectId| input.pushers.get(oid).cloned();
         let mut rewrites = Vec::new();
+        for (old, source) in missing {
+            rewrites.push(Rewrite {
+                old_tip: old.to_string(),
+                source,
+                lost: Vec::new(),
+                lost_truncated: false,
+                missing: true,
+                push: pusher(&old),
+            });
+        }
         for (old, source) in maximal {
             let walk = self.repo().rev_walk([old]).with_hidden([input.new_tip]).all().map_err(git_err)?;
             let mut lost = Vec::new();
@@ -84,7 +111,14 @@ impl GitRepo {
                 }
                 lost.push(self.commit_info(info.map_err(git_err)?.id)?);
             }
-            rewrites.push(Rewrite { old_tip: old.to_string(), source, lost, lost_truncated });
+            rewrites.push(Rewrite {
+                old_tip: old.to_string(),
+                source,
+                lost,
+                lost_truncated,
+                missing: false,
+                push: pusher(&old),
+            });
         }
 
         Ok(Provenance {
@@ -128,7 +162,8 @@ impl GitRepo {
                 && !replaced_by_user.contains(&oid)
                 && !out.iter().any(|(o, _)| *o == oid)
                 // The reflog may point at objects that were since garbage-collected.
-                && self.repo().has_object(oid)
+                // GitHub tips are kept even when missing (reported without details).
+                && (src == TipSource::GitHub || self.repo().has_object(oid))
             {
                 out.push((oid, src));
             }
