@@ -763,3 +763,32 @@ fn checkout_scans_the_target_tree() {
     assert!(f.local.join("docs/notes.md").is_file());
     assert!(!f.marker_exists());
 }
+
+#[test]
+fn doctor_reports_risky_user_settings_without_changing_them() {
+    let f = fx::clean_fast_forward();
+    let home = fx::home(&f);
+    let vs = "Library/Application Support/Code/User/settings.json";
+    fx::write(
+        &home,
+        vs,
+        "{ // jsonc\n  \"task.allowAutomaticTasks\": \"on\",\n  \"chat.tools.autoApprove\": true,\n}\n",
+    );
+    fx::write(&home, ".claude/settings.json", "{\"enableAllProjectMcpServers\": true}\n");
+    let before = std::fs::read_to_string(home.join(vs)).unwrap();
+    let out = shield(&f).args(["doctor", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let warns: Vec<String> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["status"] == "warn")
+        .map(|c| c["message"].as_str().unwrap().to_string())
+        .collect();
+    assert!(warns.iter().any(|m| m.contains("allowAutomaticTasks")), "{warns:#?}");
+    assert!(warns.iter().any(|m| m.contains("chat.tools.autoApprove")), "{warns:#?}");
+    assert!(warns.iter().any(|m| m.contains("enableAllProjectMcpServers")), "{warns:#?}");
+    assert!(warns.iter().any(|m| m.contains("safe.bareRepository")), "{warns:#?}");
+    assert_eq!(std::fs::read_to_string(home.join(vs)).unwrap(), before, "doctor must not modify settings");
+}

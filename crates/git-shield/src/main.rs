@@ -4,6 +4,7 @@
 
 mod audit;
 mod config;
+mod doctor;
 mod worktree;
 
 use anyhow::{Context, Result, bail};
@@ -112,6 +113,12 @@ enum Command {
         allow_unsafe_config: bool,
         #[command(flatten)]
         common: Common,
+    },
+    /// Check your own git, editor and AI-agent settings for risky defaults.
+    /// Read-only: prints suggested fixes, never changes anything.
+    Doctor {
+        #[arg(long)]
+        json: bool,
     },
     /// Show where the user config (allowlist) lives, and validate it.
     Config {
@@ -278,6 +285,7 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Pull { target, rebase, merge, reason, common } => pull(target, rebase, merge, reason, common),
         Command::Trust { action } => trust(action),
         Command::Audit { path, rev, common } => audit::run(path, rev, &common),
+        Command::Doctor { json } => doctor::run(json),
         Command::Clone { url, dir, branch, reason, common } => {
             worktree::clone(&url, dir, branch.as_deref(), reason, &common)
         }

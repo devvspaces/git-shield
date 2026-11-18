@@ -16,7 +16,7 @@ pub(crate) mod util;
 mod vscode;
 
 use shield_core::Detector;
-pub use util::glob_match;
+pub use util::{glob_match, parse_jsonc};
 
 /// All built-in detectors. Context detectors run in this order; the
 /// correlation step (`TamperedPayload`) must stay last.
