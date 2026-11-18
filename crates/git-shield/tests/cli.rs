@@ -220,7 +220,8 @@ fn pull_blocks_matador_incident_and_changes_nothing() {
     assert!(has(&v, "t10.ref-rewritten", "high", false), "{:#?}", rules(&v));
     assert!(has(&v, "t11.rewritten-copy", "critical", false), "{:#?}", rules(&v));
     assert!(has(&v, "t10.tampered-payload", "critical", false), "{:#?}", rules(&v));
-    assert!(has(&v, "t11.merge-not-by-github", "medium", false), "{:#?}", rules(&v));
+    // The forged merge is already the Critical rewritten copy; no duplicate.
+    assert!(!rules(&v).iter().any(|(r, _, _)| r == "t11.merge-not-by-github"), "{:#?}", rules(&v));
     assert!(err.contains("pull blocked"), "{err}");
     assert_eq!(head(&f), before, "HEAD moved on a blocked pull");
     assert!(!f.local.join("public/fonts/fa-solid-600.ttf").exists());

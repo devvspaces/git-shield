@@ -5,7 +5,7 @@
 //! *presence* only; cryptographic verification is Phase 5.
 
 use shield_core::{CommitInfo, Detector, Finding, ScanContext, Severity, Threat};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const GITHUB_EMAIL: &str = "noreply@github.com";
 const DAY: i64 = 24 * 3600;
@@ -80,21 +80,21 @@ impl Detector for Impersonation {
     }
 
     fn scan_context(&self, ctx: &ScanContext, out: &mut Vec<Finding>) {
+        let mut copies = HashSet::new();
         if let Some(p) = &ctx.provenance {
-            rewritten_copies(ctx, p, out);
+            copies = rewritten_copies(ctx, p, out);
             unusual_timezones(ctx, p, out);
             date_anomalies(ctx, p, out);
         }
-        for c in &ctx.commits {
-            github_merge(c, out);
-        }
+        github_merges(ctx, &copies, out);
     }
 }
 
 /// An incoming commit that duplicates a dropped one (same summary, author and
 /// author date) under a new id: the classic "rewrite the tip, keep the
-/// metadata" force-push.
-fn rewritten_copies(ctx: &ScanContext, p: &shield_core::Provenance, out: &mut Vec<Finding>) {
+/// metadata" force-push. Returns the ids of the copies it reported.
+fn rewritten_copies(ctx: &ScanContext, p: &shield_core::Provenance, out: &mut Vec<Finding>) -> HashSet<String> {
+    let mut reported = HashSet::new();
     let mut lost: HashMap<(&str, String, i64), &CommitInfo> = HashMap::new();
     for rw in &p.rewrites {
         for c in &rw.lost {
@@ -102,7 +102,7 @@ fn rewritten_copies(ctx: &ScanContext, p: &shield_core::Provenance, out: &mut Ve
         }
     }
     if lost.is_empty() {
-        return;
+        return reported;
     }
     for copy in &ctx.commits {
         let k = (copy.summary.as_str(), copy.author_email.to_ascii_lowercase(), copy.author_time);
@@ -155,37 +155,74 @@ fn rewritten_copies(ctx: &ScanContext, p: &shield_core::Provenance, out: &mut Ve
         if orig.parents != copy.parents {
             f = f.detail("Parents differ from the original.");
         }
+        reported.insert(copy.id.clone());
         out.push(f);
     }
+    reported
 }
 
 /// "Merge pull request #N" commits are created by GitHub, committed as
 /// `GitHub <noreply@github.com>` and signed with GitHub's key.
-fn github_merge(c: &CommitInfo, out: &mut Vec<Finding>) {
-    if !c.summary.starts_with("Merge pull request #") {
-        return;
+///
+/// One finding per (committer, problem), so a long range with many forged
+/// merges stays readable and one `--accept` covers one impersonator. Commits
+/// already reported as rewritten copies are skipped (that finding is stronger).
+fn github_merges(ctx: &ScanContext, skip: &HashSet<String>, out: &mut Vec<Finding>) {
+    // (committer email, unsigned-by-github?) → commits, newest first (ctx order).
+    let mut groups: Vec<((String, bool), Vec<&CommitInfo>)> = Vec::new();
+    for c in &ctx.commits {
+        if !c.summary.starts_with("Merge pull request #") || skip.contains(&c.id) {
+            continue;
+        }
+        let by_github = c.committer_email.eq_ignore_ascii_case(GITHUB_EMAIL);
+        if by_github && c.signed {
+            continue;
+        }
+        let key = (c.committer_email.to_ascii_lowercase(), by_github);
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, v)) => v.push(c),
+            None => groups.push((key, vec![c])),
+        }
     }
-    let by_github = c.committer_email.eq_ignore_ascii_case(GITHUB_EMAIL);
-    let (title, detail) = if !by_github {
-        (
-            "GitHub-style merge commit was not committed by GitHub",
-            format!(
-                "Committer is {}; merges made on GitHub are committed by GitHub <{GITHUB_EMAIL}>.",
-                who(&c.committer_name, &c.committer_email)
-            ),
-        )
-    } else if !c.signed {
-        ("GitHub merge commit has no signature", "Merges made on GitHub are signed by GitHub's key.".to_string())
-    } else {
-        return;
-    };
-    out.push(
-        Finding::new(Threat::T11, "t11.merge-not-by-github", Severity::Medium, title)
-            .commit(c.id.clone())
-            .anchor(c.id.clone())
-            .detail(format!("\"{}\"", c.summary))
-            .detail(detail),
-    );
+    for ((email, by_github), commits) in groups {
+        let first = commits[0];
+        let n = commits.len();
+        let (title, detail, anchor) = if by_github {
+            (
+                if n == 1 {
+                    "GitHub merge commit has no signature".to_string()
+                } else {
+                    format!("{n} GitHub merge commits have no signature")
+                },
+                "Merges made on GitHub are signed by GitHub's key.".to_string(),
+                format!("merge-unsigned:{email}"),
+            )
+        } else {
+            (
+                if n == 1 {
+                    format!("GitHub-style merge commit was not committed by GitHub (by {})", first.committer_name)
+                } else {
+                    format!("{n} GitHub-style merge commits were not committed by GitHub (by {})", first.committer_name)
+                },
+                format!(
+                    "Committer is {}; merges made on GitHub are committed by GitHub <{GITHUB_EMAIL}>.",
+                    who(&first.committer_name, &first.committer_email)
+                ),
+                format!("merge-not-github:{email}"),
+            )
+        };
+        let mut f = Finding::new(Threat::T11, "t11.merge-not-by-github", Severity::Medium, title)
+            .commit(first.id.clone())
+            .anchor(anchor)
+            .detail(detail);
+        for c in commits.iter().take(LIST_LIMIT) {
+            f = f.detail(format!("  {}  {}", short(&c.id), c.summary));
+        }
+        if n > LIST_LIMIT {
+            f = f.detail(format!("  … and {} more", n - LIST_LIMIT));
+        }
+        out.push(f);
+    }
 }
 
 fn unusual_timezones(ctx: &ScanContext, p: &shield_core::Provenance, out: &mut Vec<Finding>) {
@@ -349,7 +386,8 @@ mod tests {
         assert_eq!(c.severity, Severity::Critical);
         assert!(c.details.iter().any(|d| d.contains("original was signed")));
         assert!(c.details.iter().any(|d| d.contains("+0100 → -0800")));
-        assert!(get(&out, "t11.merge-not-by-github").is_some());
+        // Already covered by the Critical rewritten-copy finding.
+        assert!(get(&out, "t11.merge-not-by-github").is_none());
     }
 
     #[test]
@@ -374,6 +412,22 @@ mod tests {
         assert_eq!(get(&out, "t11.merge-not-by-github").unwrap().title, "GitHub merge commit has no signature");
         let signed = commit("b", "Merge pull request #1 from x/y", GH, 0, true);
         assert!(run(&ctx(vec![signed], vec![])).is_empty());
+    }
+
+    #[test]
+    fn forged_merges_group_per_committer() {
+        let mut v: Vec<CommitInfo> = (0..12)
+            .map(|i| commit(&format!("{i:02x}"), &format!("Merge pull request #{i} from x/y"), HY, 0, false))
+            .collect();
+        v.push(commit("ee", "Merge pull request #99 from x/y", ("Eve", "eve@example.com"), 0, false));
+        let out = run(&ctx(v, vec![]));
+        let m: Vec<_> = out.iter().filter(|f| f.rule == "t11.merge-not-by-github").collect();
+        assert_eq!(m.len(), 2, "{m:#?}");
+        assert!(m[0].title.starts_with("12 GitHub-style merge commits"));
+        assert!(m[0].details.iter().any(|d| d.contains("… and 2 more")));
+        assert_eq!(m[1].title, "GitHub-style merge commit was not committed by GitHub (by Eve)");
+        // The anchor is per committer, so the id is stable as the range grows.
+        assert_eq!(m[0].anchor.as_deref(), Some("merge-not-github:h@example.com"));
     }
 
     #[test]

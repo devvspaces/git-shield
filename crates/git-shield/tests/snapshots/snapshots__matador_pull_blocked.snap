@@ -35,11 +35,6 @@ git-shield · HEAD..origin/dev · 3 commits, 8 file versions scanned
            ·   [sha]  Merge pull request #2921 from org/fix-transfer-ownership-bug  (Hycienth E.O)
            · Confirm with whoever owns the branch before pulling. On GitHub: repository → Activity → force pushes.
 
- MEDIUM    GS-T11-[id]  GitHub-style merge commit was not committed by GitHub
-           @ [sha]
-           · "Merge pull request #2921 from org/fix-transfer-ownership-bug"
-           · Committer is Hycienth E.O <1038+hycienth@users.noreply.github.com>; merges made on GitHub are committed by GitHub <noreply@github.com>.
-
  MEDIUM    GS-T12-[id]  Line-ending rewrite hides 4 real changed lines
            app/views.py
            · raw diff ≈ 606 lines, ignoring whitespace ≈ 4 lines
@@ -65,6 +60,6 @@ git-shield · HEAD..origin/dev · 3 commits, 8 file versions scanned
            .vscode/extensions.json  @ [sha]
            · VS Code workspace config (tasks/settings/launch can run code)
 
-BLOCKED: 4 finding(s) at high or above  (3 critical, 1 high, 4 medium, 1 low, 2 info)
+BLOCKED: 4 finding(s) at high or above  (3 critical, 1 high, 3 medium, 1 low, 2 info)
 2 info finding(s) hidden; use --verbose to show
 After reviewing, accept with: --accept GS-T10-[id] --accept GS-T11-[id] --accept GS-T2-[id] --accept GS-T10-[id]
