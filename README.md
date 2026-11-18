@@ -30,7 +30,7 @@ BLOCKED: 4 finding(s) at high or above  (3 critical, 1 high, 4 medium, 1 low, 2 
 git-shield: pull blocked; nothing was merged.
 ```
 
-> Status: **early development (Phase 2 done)**. `scan`, `check` and the `pull` gate work offline, with an optional GitHub force-push lookup; deep content detectors (AI-agent configs, lifecycle scripts) are next. See [docs/PROGRESS.md](docs/PROGRESS.md).
+> Status: **early development (Phase 3 done)**. `scan`, `check` and the `pull` gate work offline, with an optional GitHub force-push lookup, and cover AI-agent configs, lifecycle scripts, CI and obfuscation; `clone`/`checkout`/`doctor` are next. See [docs/PROGRESS.md](docs/PROGRESS.md).
 
 ## What it detects
 
@@ -43,7 +43,13 @@ git-shield: pull blocked; nothing was merged.
 | Noise masking | CRLF/whitespace churn hiding small real changes |
 | History in transit | payloads added then removed in intermediate commits |
 | Force-push / impersonation | a branch that dropped commits you had (or that GitHub logged as force-pushed by someone else), unsigned copies of signed merges, "Merge pull request" commits not made by GitHub, odd timezones and dates |
-| *Coming* | AI-agent configs, lifecycle scripts, devcontainers/CI, obfuscation, GitHub commit verification |
+| AI-agent configs | Claude Code / Gemini / Codex hooks and helper commands, MCP servers, `enableAllProjectMcpServers`, API-endpoint redirects, invisible text or covert commands in AGENTS.md / CLAUDE.md / Cursor rules |
+| Lifecycle scripts | npm install scripts, `setup.py` / `conftest.py` side effects, `.pth` files, build backends, Makefiles and repo git hooks that fetch-and-run |
+| Shell env | direnv `.envrc` commands, mise hooks |
+| Devcontainers / CI | `initializeCommand` (runs on the host), `toJSON(secrets)`, `pull_request_target` checkouts, self-hosted runner backdoors, script injection |
+| Obfuscation | code hidden off-screen after long whitespace, decode-then-execute, huge lines, high-entropy blobs; and which task/hook/script runs them |
+| Known indicators | a small, sourced list of worm artefacts (`crates/shield-rules/data/signatures.toml`) |
+| *Coming* | GitHub commit verification, `clone`/`checkout` gates, `doctor` |
 
 Full list with sources: [docs/THREATS.md](docs/THREATS.md).
 
@@ -66,6 +72,16 @@ git shield check --json             # machine-readable
 git shield check --accept GS-T2-…   # mark a reviewed finding as accepted
 git shield trust list               # what this repo has accepted / last pulled tips
 git shield trust forget GS-T2-…     # un-accept (or --all, or --ref origin/dev)
+```
+Reviewed something your team uses on purpose (an MCP server, a hook)? Allow it in your own config, never the repo's ([ADR 0005](docs/adr/0005-user-allowlist.md)):
+```toml
+# ~/.config/git-shield/config.toml   (git shield config path / check)
+[[allow]]
+rule = "t4.mcp.server"
+path = ".mcp.json"
+repo = "github.com/acme/*"
+reason = "our docs MCP server, reviewed 2026-11"
+# Critical findings are only allowed with `blob = "<content id>"` pinned.
 ```
 For GitHub remotes, `check` and `pull` also read the branch's force-push log, so a rewrite is caught even if this machine never saw the old tip. They use `GITHUB_TOKEN` or your `gh` login. The token is only sent to api.github.com. Use `--no-github` to skip this, or `scan --github` to add it to a local scan. Without a token it notes the skip and carries on.
 Exit codes: `0` clean · `1` warnings · `2` blocked · `3` error.

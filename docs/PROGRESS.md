@@ -7,9 +7,9 @@
 
 | | |
 |---|---|
-| **Phase** | 2 done (+ Phase 4's force-push history slice) → 3 next: deep content detectors (v0.2) |
-| **Last completed** | Session 3: GitHub force-push history (ADR 0004, `shield-github`), `git shield trust list/forget`, grouped `t11.merge-not-by-github`. 67 tests green |
-| **Next task** | Phase 3: T4 AI-agent configs first (highest 2026 activity), then T5, T6, T9, T13, `signatures.toml`, user allowlist |
+| **Phase** | 3 done (v0.2 content) → 5 next: `clone` / `checkout` / `audit` / `install` / `doctor` (Phase 4 remainder optional) |
+| **Last completed** | Session 4: Phase 3. T4/T5/T6/T9/T13 detectors, `signatures.toml`, user allowlist (ADR 0005), FP run (0 High/Critical on 10 repos). 97 tests green |
+| **Next task** | Phase 5: `git shield clone` (scan full tree before checkout) and `audit` (repos that arrive as files), then `doctor` |
 | **Blockers** | None |
 | **Perf** | Warm, release build, matador-legacy: `scan af20233d8..d9351023d` (20 commits, 58 file versions) **~30 ms**; `scan HEAD..origin/dev` with provenance **~20–90 ms** (target < 300 ms); GitHub lookup adds **~1–2 s** of network |
 
@@ -47,10 +47,10 @@
 - [x] `git shield trust list [--json]` / `trust forget <ID>… | --all | --ref <REF>`
 - [x] `t11.merge-not-by-github` grouped per committer; skips commits already reported as rewritten copies
 
-### Phase 3: Deep content detectors (v0.2)
-- [ ] T4 AI-agent configs · T5 lifecycle scripts · T6 shell env · T9 devcontainer/CI · T13 obfuscation
-- [ ] `signatures.toml` IOC list
-- [ ] User allowlist; false-positive run over 10 popular repos (0 High)
+### Phase 3: Deep content detectors (v0.2) ✅
+- [x] T4 AI-agent configs (`agents.rs`) · T5 lifecycle scripts (`lifecycle.rs`) · T6 shell env (`shellenv.rs`) · T9 devcontainer/CI (`ci.rs`) · T13 obfuscation (`obfuscation.rs`) + `t13.payload-wired`
+- [x] `signatures.toml` IOC list (sourced entries only)
+- [x] User allowlist (ADR 0005); false-positive run over 10 popular repos: 0 High/Critical (`scripts/fp-run.sh`)
 
 ### Phase 4: GitHub provenance, optional (v0.3)
 - [x] Activity API force-push history + actors, offline degradation, fake-API tests (session 3, ADR 0004)
@@ -70,6 +70,9 @@
 - ~~No way to list/forget stored acceptances~~ `git shield trust` in session 3.
 - The GitHub activity log is read up to 3 pages (300 force-pushes). Very busy branches without a trust record could miss older events.
 - `scan --github` needs the range to end at a remote-tracking ref (it derives remote/branch from it).
+- Content rules see added lines and changed entries per file version. A payload split across two files or two commits only correlates via `t13.payload-wired` (refs) or `t10.tampered-payload`.
+- `t9.workflow.remote-exec` (Medium) fires on common `curl … | sh` installer steps in CI. It was 10 hits across the FP repos. Consider an allowlist of well-known installer hosts.
+- The signature list is small on purpose. Grow it only with sourced entries.
 - `read_local_state` reads `config` + `config.worktree` and skips includes. Consider reporting the include target path itself.
 - Real-world note: VS Code's GitHub extension writes thousands of `github-pr-owner-number` values into `.git/config`. That once made the config read quadratic (fixed; keep a test in mind).
 
@@ -115,3 +118,51 @@
   - `scan --github HEAD..origin/dev` reports 3 Medium "already in your branch" rewrites by the compromised accounts: @Fidel-wole 2026-10-28 (`7d12a98e3`); @Shobayosamuel 2026-11-04 (`a1c96d040`); @Shobayosamuel 2026-11-11, which dropped PR #2934's merge `fa59f748c`, later restored in `3442cdb52`. The user's own 11-12 restore push is ignored.
   - The offline scan is still CLEAN. The incident replay still BLOCKS, and the warn range still warns (now with fewer duplicate merge findings).
 - Tests: 67 (32 rule unit, 2 core, 2 trust, 3 github, 24 CLI, 4 snapshots).
+
+### 2026-11-18: Session 4 (Phase 3: deep content detectors)
+- Shared helpers in `shield-rules/src/util.rs`:
+  - `danger()`: the REMOTE_EXEC / EXEC_ASSET regexes, moved out of vscode.rs;
+  - `ExecEntry` + `changed_entries` (diff-aware), `added_lines`, `texts`;
+  - `refs_in` (repo files a command runs);
+  - `glob_match`, which is public (used by the allowlist).
+
+  `Finding.refs` is new.
+- **T4 `agents.rs`** (`t4.*`):
+  - commands Claude Code / Gemini / Codex run by themselves: hooks, statusLine, apiKeyHelper & co, tool commands, `notify`;
+  - MCP servers (Medium, High when auto-approved or `trust: true`, Critical on payload markers);
+  - `enableAllProjectMcpServers`, API/proxy env redirects, `bypassPermissions` / broad Bash allows;
+  - instruction files with invisible Unicode or covert fetch-and-run lines; Cursor `alwaysApply`;
+  - VS Code agent auto-approve settings (in vscode.rs).
+- **T5 `lifecycle.rs`**: npm lifecycle scripts; setup.py / conftest / sitecustomize module-level exec or network; build backends; `.pth`; Makefile / husky / .githooks / pre-commit.
+- **T6 `shellenv.rs`**: `.envrc` commands beyond env setup, `source_url`; mise hooks / `env._.source`.
+- **T9 `ci.rs`** (yaml-rust2 0.13.0):
+  - devcontainer lifecycle commands (`initializeCommand` runs on the host → High), third-party features;
+  - workflows: `toJSON(secrets)` anywhere (Critical), encoded secrets, `pull_request_target` checkouts, self-hosted runners on issue/discussion triggers, script injection, fetch-and-run steps, new workflows.
+- **T13 `obfuscation.rs`**: off-screen code after 150+ blanks, decode-then-execute, long lines, high-entropy literals. Minified, vendored, compiled and generated code is skipped. `t13.payload-wired` (Critical) links a runner to a flagged target.
+- **Signatures** (`data/signatures.toml`): Shai-Hulud workflow path / webhook UUID, Sha1-Hulud 2.0 `setup_bun.js` / `bun_environment.js` / `SHA1HULUD`, and the matador decoy label, each with a source URL. Unsourced decoy labels were dropped.
+- **Allowlist** (ADR 0005): user `config.toml`; Critical needs a pinned `blob`; `git shield config path|check`. JSON output gains `accepted`.
+- **Engine fixes:**
+  - only the generic `path.sensitive` note is dropped when a specific finding exists (it used to drop every Path-threat finding, including signature hits);
+  - reflogs are read only for remote-tracking refs (local amends and rebases were reported as rewrites; found on matador's last 300 commits).
+- **FP run** (`scripts/fp-run.sh`, shallow `--no-checkout` clones, last 300 commits each): **0 High/Critical** after one fix (next.js `src/compiled/` bundle → skipped).
+
+  | repo | commits | ms | crit | high | med | low | info |
+  |---|---:|---:|---:|---:|---:|---:|---:|
+  | microsoft/vscode | 300 | 3114 | 0 | 0 | 0 | 12 | 46 |
+  | facebook/react | 300 | 872 | 0 | 0 | 4 | 52 | 116 |
+  | vercel/next.js | 300 | 847 | 0 | 0* | 5 | 62 | 396 |
+  | django/django | 300 | 479 | 0 | 0 | 8 | 38 | 7 |
+  | rust-lang/cargo | 1089 | 820 | 0 | 0 | 1 | 52 | 5 |
+  | kubernetes/kubernetes | 885 | 3963 | 0 | 0 | 0 | 227 | 0 |
+  | langchain-ai/langchain | 300 | 1606 | 0 | 0 | 0 | 20 | 150 |
+  | supabase/supabase | 300 | 639 | 0 | 0 | 0 | 19 | 55 |
+  | home-assistant/core | 300 | 750 | 0 | 0 | 0 | 1 | 37 |
+  | anthropics/claude-code | 398 | 1277 | 0 | 0 | 0 | 34 | 7 |
+
+  \* 1 High before the `compiled/` fix. The commit counts above 300 come from merges inside the range.
+- **Real data (read-only, matador-legacy):**
+  - `scan af20233d8..d9351023d` still warns;
+  - the incident replay still BLOCKS;
+  - `scan HEAD..origin/dev` is CLEAN (~150 ms);
+  - `scan HEAD~300..HEAD` has 0 High/Critical. Its 39 Medium include transited incident traces (`.vscode/tasks.json` folderOpen, a `.ttf` that is source code).
+- Tests: 97.

@@ -9,16 +9,16 @@ Status: ✅ detector shipped · 🚧 partial · ⏳ planned (phase in brackets)
 | T1 | `.vscode/tasks.json` / `*.code-workspace` tasks with `runOptions.runOn: "folderOpen"` | Folder opened in VS Code / Cursor / Windsurf (after trust) | ✅ |
 | T2 | Payload disguised as an asset (`.ttf`, `.woff2`, `.png`, `.svg`, …) | Executed by T1 / T5 (`node font.ttf`) | ✅ |
 | T3 | `.vscode/settings.json`: `task.allowAutomaticTasks`, terminal env/profiles, interpreter paths into the repo | Folder opened | ✅ |
-| T4 | AI-agent configs: `.claude/settings.json` hooks, `.mcp.json`, `enableAllProjectMcpServers`, `.cursor/rules/*.mdc` alwaysApply, `.gemini/settings.json`, AGENTS.md/CLAUDE.md shell directives | Agent session starts | ⏳ [3] (path-risk Low today) |
-| T5 | Lifecycle scripts: `package.json` pre/post/install & prepare, `setup.py`, `pyproject` build hooks, `.pth`, `conftest.py`, Makefile | install / test / interpreter start | ⏳ [3] (path-risk today) |
-| T6 | Shell env auto-loaders: `.envrc` (direnv), mise/asdf hooks | `cd` into repo | ⏳ [3] (path-risk today) |
+| T4 | AI-agent configs: `.claude/settings.json` hooks, `.mcp.json`, `enableAllProjectMcpServers`, `.cursor/rules/*.mdc` alwaysApply, `.gemini/settings.json`, AGENTS.md/CLAUDE.md shell directives | Agent session starts | ✅ (`agents.rs`; Codex `notify`, VS Code agent auto-approve, invisible Unicode too) |
+| T5 | Lifecycle scripts: `package.json` pre/post/install & prepare, `setup.py`, `pyproject` build hooks, `.pth`, `conftest.py`, Makefile | install / test / interpreter start | ✅ (`lifecycle.rs`; also husky/.githooks, pre-commit) |
+| T6 | Shell env auto-loaders: `.envrc` (direnv), mise/asdf hooks | `cd` into repo | ✅ (`shellenv.rs`) |
 | T7 | Local `.git/config` execution keys (`core.fsmonitor`, `core.sshCommand`, `core.hooksPath`, `core.pager`, `diff.external`, `filter.*`, `uploadpack.packObjectsHook`, `alias.*=!`, includes…) and installed hooks | Any git command after a repo arrives *as files* (GitSpawn) | ✅ |
 | T8 | `.gitattributes` custom filter/diff/merge drivers; `.gitmodules` URL swap, `ext::`, `update=!cmd`, path escape | checkout / diff / `submodule update` | ✅ |
-| T9 | `.devcontainer` lifecycle commands; `.github/workflows` with `pull_request_target`, secret exfiltration | Container open / CI | ⏳ [3] (path-risk today) |
+| T9 | `.devcontainer` lifecycle commands; `.github/workflows` with `pull_request_target`, secret exfiltration | Container open / CI | ✅ (`ci.rs`; self-hosted runner backdoor, script injection) |
 | T10 | History rewrite / force-push over a tip you had already seen | pull after an account compromise | ✅ offline (pre-fetch tip, reflog, trust store) + GitHub force-push log (ADR 0004) |
 | T11 | Impersonated commits: copied merge with a new SHA, dropped signature, "Merge pull request" not committed by GitHub, odd timezone, backdating | same | ✅ offline (+ GitHub API [4]) |
 | T12 | Whitespace / CRLF churn that buries a small real change in a huge diff | code review | ✅ |
-| T13 | Obfuscated code (eval+base64/hex, `exec(compile(`, zlib+b64 chains, long single lines, high entropy) | running the app | ⏳ [3] |
+| T13 | Obfuscated code (eval+base64/hex, `exec(compile(`, zlib+b64 chains, long single lines, high entropy) | running the app | ✅ (`obfuscation.rs`; off-screen code; `t13.payload-wired` correlation) |
 
 ## Detail and sources
 

@@ -11,8 +11,19 @@ const SOURCE_EXT: &[&str] = &[
     "js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx", "py", "sh", "bash", "zsh", "ps1", "rb", "php", "pl", "vue",
     "svelte",
 ];
-const SKIP_DIRS: &[&str] =
-    &["dist", "build", "vendor", "node_modules", "third_party", "third-party", ".next", "out", "coverage"];
+const SKIP_DIRS: &[&str] = &[
+    "dist",
+    "build",
+    "vendor",
+    "node_modules",
+    "third_party",
+    "third-party",
+    ".next",
+    "out",
+    "coverage",
+    "compiled",
+    "__generated__",
+];
 const OFFSCREEN_GAP: usize = 150;
 const LONG_LINE: usize = 5000;
 const SECRET_LEN: usize = 200;
@@ -241,6 +252,7 @@ mod tests {
         // Out of scope: minified / vendored / non-source.
         assert!(scan(&Obfuscation, &added("dist/x.js", py.as_bytes())).is_empty());
         assert!(scan(&Obfuscation, &added("lib/x.min.js", py.as_bytes())).is_empty());
+        assert!(scan(&Obfuscation, &added("packages/next/src/compiled/webpack/bundle5.js", py.as_bytes())).is_empty());
     }
 
     #[test]
