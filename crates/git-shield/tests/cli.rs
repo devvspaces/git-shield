@@ -258,6 +258,49 @@ fn pull_after_accepting_fast_forwards_and_remembers() {
 }
 
 #[test]
+fn trust_list_and_forget() {
+    let f = fx::matador_incident();
+    let before = head(&f);
+    let (_, v, _) = json_pull(&f, &[]);
+    let ids = blocking_ids(&v);
+    let mut args = accept_args(&ids);
+    args.extend(["--reason".into(), "reviewed".into()]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (code, _, err) = json_pull(&f, &args);
+    assert_eq!(code, 1, "{err}");
+
+    let out = shield(&f).args(["trust", "list", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let list: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let stored: Vec<&str> = list["accepted"].as_array().unwrap().iter().map(|a| a["id"].as_str().unwrap()).collect();
+    for id in &ids {
+        assert!(stored.contains(&id.as_str()), "{id} missing from {list:#}");
+    }
+    assert!(list["refs"]["refs/remotes/origin/dev"]["tip"].is_string(), "{list:#}");
+    let text = shield(&f).args(["trust", "list"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&text.stdout).contains("reviewed"));
+
+    // With the stored acceptances, re-scanning what came in does not block.
+    let range = format!("{before}..origin/dev");
+    let code = |f: &fx::Fixture| shield(f).args(["scan", &range]).output().unwrap().status.code();
+    assert_ne!(code(&f), Some(2));
+
+    let out = shield(&f).args(["trust", "forget", &ids[0], "GS-NOPE-000000"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "unknown id must be reported");
+    assert!(String::from_utf8_lossy(&out.stdout).contains(&format!("Forgot {}", ids[0])));
+    let out = shield(&f).args(["trust", "forget", "--all"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(code(&f), Some(2), "forgotten acceptances must block again");
+
+    let out = shield(&f).args(["trust", "forget", "--ref", "origin/dev"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = shield(&f).args(["trust", "list", "--json"]).output().unwrap();
+    let list: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(list["refs"].as_object().unwrap().is_empty() && list["accepted"].as_array().unwrap().is_empty());
+    assert!(!f.marker_exists());
+}
+
+#[test]
 fn pull_blocks_incident_via_provenance_alone() {
     let f = fx::matador_incident_with(fx::IncidentOpts { font: false });
     let before = head(&f);

@@ -115,6 +115,23 @@ impl TrustStore {
         self.data.refs.insert(ref_name.to_string(), TrustedTip { tip: tip.to_string(), at: now });
     }
 
+    /// Remove one accepted id. Returns whether it was present.
+    pub fn forget(&mut self, id: &str) -> bool {
+        let n = self.data.accepted.len();
+        self.data.accepted.retain(|a| a.id != id);
+        self.data.accepted.len() != n
+    }
+
+    /// Remove every accepted id. Returns how many there were.
+    pub fn forget_all(&mut self) -> usize {
+        std::mem::take(&mut self.data.accepted).len()
+    }
+
+    /// Drop the trusted tip of a ref. Returns whether it was present.
+    pub fn forget_ref(&mut self, ref_name: &str) -> bool {
+        self.data.refs.remove(ref_name).is_some()
+    }
+
     /// Atomic write: temp file in the same directory, then rename.
     pub fn save(&self) -> Result<()> {
         let dir = self.path.parent().expect("store path has a parent");
@@ -148,5 +165,22 @@ mod tests {
 
         let other = TrustStore::open_at(root.path(), Path::new("/repos/b/.git")).unwrap();
         assert!(other.data.accepted.is_empty());
+    }
+
+    #[test]
+    fn forget() {
+        let root = tempfile::tempdir().unwrap();
+        let mut s = TrustStore::open_at(root.path(), Path::new("/repos/a/.git")).unwrap();
+        s.accept("GS-A", "r", None, 1);
+        s.accept("GS-B", "r", None, 1);
+        s.accept("GS-C", "r", None, 1);
+        s.set_tip("refs/remotes/origin/dev", "abc", 1);
+        assert!(s.forget("GS-A"));
+        assert!(!s.forget("GS-A"));
+        assert_eq!(s.accepted_ids().collect::<Vec<_>>(), ["GS-B", "GS-C"]);
+        assert_eq!(s.forget_all(), 2);
+        assert!(s.forget_ref("refs/remotes/origin/dev"));
+        assert!(!s.forget_ref("refs/remotes/origin/dev"));
+        assert!(s.trusted_tip("refs/remotes/origin/dev").is_none());
     }
 }

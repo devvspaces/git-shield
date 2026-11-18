@@ -63,6 +63,37 @@ enum Command {
         #[command(flatten)]
         common: Common,
     },
+    /// Show or change what git-shield remembers for this repository
+    /// (accepted findings and the last tip pulled per ref).
+    Trust {
+        #[command(subcommand)]
+        action: TrustAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum TrustAction {
+    /// List trusted tips and accepted findings.
+    List {
+        #[arg(long, short = 'C', default_value = ".")]
+        repo: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Forget accepted findings (they will block again), or a ref's trusted tip.
+    #[command(group(clap::ArgGroup::new("what").required(true).args(["ids", "all", "ref_name"])))]
+    Forget {
+        /// Finding ids to forget.
+        ids: Vec<String>,
+        /// Forget every accepted finding.
+        #[arg(long)]
+        all: bool,
+        /// Forget the trusted tip of this ref (e.g. origin/dev or refs/remotes/origin/dev).
+        #[arg(long = "ref", value_name = "REF")]
+        ref_name: Option<String>,
+        #[arg(long, short = 'C', default_value = ".")]
+        repo: PathBuf,
+    },
 }
 
 #[derive(Args)]
@@ -145,7 +176,92 @@ fn run(cli: Cli) -> Result<u8> {
             Ok(emit(&scan(&ctx), &accepted(&common, &store), &common))
         }
         Command::Pull { target, rebase, merge, reason, common } => pull(target, rebase, merge, reason, common),
+        Command::Trust { action } => trust(action),
     }
+}
+
+fn trust(action: TrustAction) -> Result<u8> {
+    match action {
+        TrustAction::List { repo, json } => {
+            let repo = GitRepo::discover(&repo)?;
+            let store = TrustStore::open(&repo)?;
+            if json {
+                let v = serde_json::json!({
+                    "path": store.path(),
+                    "repo_path": store.data.repo_path,
+                    "refs": store.data.refs,
+                    "accepted": store.data.accepted,
+                });
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(0);
+            }
+            println!("Trust store: {}", store.path().display());
+            if store.data.refs.is_empty() {
+                println!("\nNo trusted tips yet (they are recorded by `git shield pull`).");
+            } else {
+                println!("\nTrusted tips:");
+                for (r, t) in &store.data.refs {
+                    println!("  {:<32} {}  {}", display_ref(r), &t.tip[..t.tip.len().min(9)], date(t.at));
+                }
+            }
+            if store.data.accepted.is_empty() {
+                println!("\nNo accepted findings.");
+            } else {
+                println!("\nAccepted findings:");
+                for a in &store.data.accepted {
+                    let tip = a.tip.as_deref().map(|t| format!("  at {}", &t[..t.len().min(9)])).unwrap_or_default();
+                    println!("  {:<18} {}{tip}  \"{}\"", a.id, date(a.at), a.reason);
+                }
+            }
+            Ok(0)
+        }
+        TrustAction::Forget { ids, all, ref_name, repo } => {
+            let repo = GitRepo::discover(&repo)?;
+            let mut store = TrustStore::open(&repo)?;
+            let mut code = 0;
+            if all {
+                println!("Forgot {} accepted finding(s).", store.forget_all());
+            }
+            for id in &ids {
+                if store.forget(id) {
+                    println!("Forgot {id}.");
+                } else {
+                    eprintln!("git-shield: {id} was not accepted.");
+                    code = 1;
+                }
+            }
+            if let Some(r) = ref_name {
+                let full = repo.full_ref_name(&r).unwrap_or(r.clone());
+                if store.forget_ref(&full) || store.forget_ref(&r) {
+                    println!("Forgot the trusted tip of {}.", display_ref(&full));
+                } else {
+                    eprintln!("git-shield: no trusted tip recorded for {r}.");
+                    code = 1;
+                }
+            }
+            store.save().with_context(|| format!("writing trust store {}", store.path().display()))?;
+            Ok(code)
+        }
+    }
+}
+
+fn display_ref(name: &str) -> &str {
+    name.strip_prefix("refs/remotes/").or_else(|| name.strip_prefix("refs/heads/")).unwrap_or(name)
+}
+
+/// `YYYY-MM-DD` (UTC) from unix seconds.
+fn date(secs: i64) -> String {
+    // Civil-from-days (Howard Hinnant), avoiding a date crate for one line of output.
+    let z = secs.div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 fn pull(target: Target, rebase: bool, merge: bool, reason: Option<String>, common: Common) -> Result<u8> {

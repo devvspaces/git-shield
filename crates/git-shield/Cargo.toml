@@ -21,6 +21,7 @@ shield-report = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 dialoguer = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 shield-fixtures = { path = "../shield-fixtures" }
