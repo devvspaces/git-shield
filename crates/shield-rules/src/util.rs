@@ -42,6 +42,19 @@ pub(crate) fn changed_entries<'a>(old: &[ExecEntry], new: &'a [ExecEntry]) -> Ve
     new.iter().filter(|n| !old.iter().any(|o| o.key == n.key && o.command == n.command)).collect()
 }
 
+/// Lines of `new` (untrimmed) whose trimmed text does not occur in `old`; blank lines skipped.
+pub(crate) fn added_lines<'a>(old: &str, new: &'a str) -> Vec<&'a str> {
+    let seen: std::collections::HashSet<&str> = old.lines().map(str::trim).collect();
+    new.lines().filter(|l| !l.trim().is_empty() && !seen.contains(l.trim())).collect()
+}
+
+/// Old and new text of a change (old is empty for additions).
+pub(crate) fn texts(c: &shield_core::FileChange) -> Option<(String, String)> {
+    let new = c.new.as_ref()?.text().into_owned();
+    let old = c.old.as_ref().map(|o| o.text().into_owned()).unwrap_or_default();
+    Some((old, new))
+}
+
 /// Repository-relative paths mentioned in a command line (`./x/y.js`, `public/a.ttf`).
 pub(crate) fn refs_in(cmd: &str) -> Vec<String> {
     cmd.split(|c: char| c.is_whitespace() || "\"'`;|&()<>=,[]".contains(c))

@@ -4,9 +4,11 @@ mod agents;
 mod assets;
 mod gitconfig;
 mod gitmeta;
+mod lifecycle;
 mod noise;
 mod paths;
 mod provenance;
+mod shellenv;
 pub(crate) mod util;
 mod vscode;
 
@@ -28,6 +30,8 @@ pub fn builtin() -> Vec<Box<dyn Detector>> {
         Box::new(paths::ModeChanges),
         Box::new(agents::AgentConfig),
         Box::new(agents::AgentInstructions),
+        Box::new(lifecycle::Lifecycle),
+        Box::new(shellenv::ShellEnv),
         Box::new(provenance::RefRewritten),
         Box::new(provenance::Impersonation),
         Box::new(provenance::TamperedPayload),

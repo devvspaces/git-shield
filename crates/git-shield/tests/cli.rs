@@ -554,3 +554,11 @@ fn agent_hook_worm_is_blocked() {
     assert!(has(&v, "t4.claude.mcp-auto-approve", "high", false), "{:#?}", rules(&v));
     assert!(has(&v, "t4.mcp.server", "critical", false), "{:#?}", rules(&v));
 }
+
+#[test]
+fn lifecycle_dropper_is_blocked() {
+    let f = fx::lifecycle_dropper();
+    let (code, v) = check_rules(&f);
+    assert_eq!(code, 2, "{:#?}", rules(&v));
+    assert!(has(&v, "t5.npm.script", "critical", false), "{:#?}", rules(&v));
+}

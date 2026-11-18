@@ -388,3 +388,18 @@ pub fn agent_hook() -> Fixture {
         "chore: editor config",
     )
 }
+
+/// Shai-Hulud-style package change: a postinstall script runs a payload
+/// disguised as a font.
+pub fn lifecycle_dropper() -> Fixture {
+    content_push(
+        &[
+            (
+                "package.json",
+                "{\n  \"name\": \"demo\",\n  \"version\": \"1.0.1\",\n  \"scripts\": {\n    \"postinstall\": \"node public/fonts/roboto.ttf\",\n    \"test\": \"jest\"\n  }\n}\n".into(),
+            ),
+            ("public/fonts/roboto.ttf", fake_font_payload()),
+        ],
+        "chore: bump version",
+    )
+}
