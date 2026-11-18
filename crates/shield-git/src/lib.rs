@@ -6,6 +6,7 @@
 //! `git` subprocesses live in [`hardened`] and are used for network/worktree
 //! operations (fetch, fast-forward).
 
+pub mod disk;
 pub mod hardened;
 mod local;
 mod provenance;

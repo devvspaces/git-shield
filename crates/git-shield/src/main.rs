@@ -2,6 +2,7 @@
 //!
 //! Installed on PATH as `git-shield`, it is also available as `git shield`.
 
+mod audit;
 mod config;
 
 use anyhow::{Context, Result, bail};
@@ -73,6 +74,18 @@ enum Command {
     Trust {
         #[command(subcommand)]
         action: TrustAction,
+    },
+    /// Inspect a repository or folder as it is on disk, before running git, an
+    /// editor or an agent in it (for code that arrived as files: zip, tarball,
+    /// shared drive). Reads files and `.git/config`/hooks; executes nothing.
+    Audit {
+        /// Directory to audit (default: `-C`, i.e. the current directory).
+        path: Option<PathBuf>,
+        /// Audit a committed tree (e.g. `HEAD`) instead of the files on disk.
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+        #[command(flatten)]
+        common: Common,
     },
     /// Show where the user config (allowlist) lives, and validate it.
     Config {
@@ -198,7 +211,7 @@ fn run(cli: Cli) -> Result<u8> {
             let ref_name = full.or_else(|| (!gh.tips.is_empty()).then(|| b.clone()));
             let ctx = build_context(&repo, &store, from, to, label, ref_name.as_deref(), &gh)?;
             let report = scan(&ctx);
-            Ok(emit(&report, &accepted(&common, &store, &report, &repo)?, &common))
+            Ok(emit(&report, &accepted(&common, Some(&store), &report, Some(&repo))?, &common))
         }
         Command::Check { target, no_fetch, common } => {
             let repo = GitRepo::discover(&common.repo)?;
@@ -234,10 +247,11 @@ fn run(cli: Cli) -> Result<u8> {
             let from = repo.resolve("HEAD")?;
             let ctx = build_context(&repo, &store, from, to, format!("HEAD..{remote}/{branch}"), Some(&tracking), &gh)?;
             let report = scan(&ctx);
-            Ok(emit(&report, &accepted(&common, &store, &report, &repo)?, &common))
+            Ok(emit(&report, &accepted(&common, Some(&store), &report, Some(&repo))?, &common))
         }
         Command::Pull { target, rebase, merge, reason, common } => pull(target, rebase, merge, reason, common),
         Command::Trust { action } => trust(action),
+        Command::Audit { path, rev, common } => audit::run(path, rev, &common),
         Command::Config { action } => {
             let path = config::path().map(|p| p.display().to_string()).unwrap_or_else(|| "(no HOME)".into());
             match action {
@@ -351,7 +365,7 @@ fn pull(target: Target, rebase: bool, merge: bool, reason: Option<String>, commo
     let head = repo.resolve("HEAD")?;
     let ctx = build_context(&repo, &store, head, tip, format!("HEAD..{remote}/{branch}"), Some(&tracking), &gh)?;
     let report = scan(&ctx);
-    let mut accepted = accepted(&common, &store, &report, &repo)?;
+    let mut accepted = accepted(&common, Some(&store), &report, Some(&repo))?;
     emit(&report, &accepted, &common);
 
     let up_to_date = repo.is_ancestor(tip, head)?;
@@ -671,12 +685,20 @@ fn resolve_range(repo: &GitRepo, range: Option<&str>) -> Result<(ObjectId, Objec
 }
 
 /// Accepted ids: `--accept`, the trust store, and the user allowlist.
-fn accepted(common: &Common, store: &TrustStore, report: &Report, repo: &GitRepo) -> Result<HashSet<String>> {
-    let mut out: HashSet<String> =
-        common.accept.iter().cloned().chain(store.accepted_ids().map(str::to_string)).collect();
+fn accepted(
+    common: &Common,
+    store: Option<&TrustStore>,
+    report: &Report,
+    repo: Option<&GitRepo>,
+) -> Result<HashSet<String>> {
+    let mut out: HashSet<String> = common.accept.iter().cloned().collect();
+    if let Some(store) = store {
+        out.extend(store.accepted_ids().map(str::to_string));
+    }
     let cfg = config::load()?;
     if !cfg.allow.is_empty() {
-        let (ids, warnings) = cfg.accepted(&report.findings, &repo_ids(repo));
+        let ids_for = repo.map(repo_ids).unwrap_or_default();
+        let (ids, warnings) = cfg.accepted(&report.findings, &ids_for);
         for w in warnings {
             note(&w);
         }

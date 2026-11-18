@@ -154,6 +154,41 @@ impl GitRepo {
         })
     }
 
+    /// Every file in `commit`'s tree, as additions: what a fresh checkout writes.
+    pub fn tree_scan(&self, commit: ObjectId, label: impl Into<String>) -> Result<ScanContext> {
+        let tree = self.commit_tree(commit)?;
+        let changes = self
+            .diff_trees(None, Some(tree))?
+            .into_iter()
+            .map(|ch| self.materialize(ch, None, false))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ScanContext {
+            label: label.into(),
+            tip: Some(commit.to_string()),
+            changes,
+            local: Some(local::read_local_state(self)?),
+            ..Default::default()
+        })
+    }
+
+    /// The working-tree change of switching from `from` to `to` (plain tree
+    /// diff, no merge base): what `git checkout` would write.
+    pub fn tree_delta(&self, from: ObjectId, to: ObjectId, label: impl Into<String>) -> Result<ScanContext> {
+        let changes = self
+            .diff_trees(Some(self.commit_tree(from)?), Some(self.commit_tree(to)?))?
+            .into_iter()
+            .map(|ch| self.materialize(ch, None, false))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ScanContext {
+            label: label.into(),
+            base: Some(from.to_string()),
+            tip: Some(to.to_string()),
+            changes,
+            local: Some(local::read_local_state(self)?),
+            ..Default::default()
+        })
+    }
+
     /// Commits reachable from `to` and not from `from`, newest first.
     pub fn commit_range(&self, from: ObjectId, to: ObjectId) -> Result<Vec<CommitInfo>> {
         let walk = self.repo.rev_walk([to]).with_hidden([from]).all().map_err(git_err)?;

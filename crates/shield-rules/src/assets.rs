@@ -121,16 +121,29 @@ impl Detector for DisguisedAsset {
                         .detail("This is the fake-font technique used by DPRK 'Contagious Interview' campaigns: an auto-run task runs `node <font>`."),
                 );
             } else {
-                out.push(
-                    Finding::new(
-                        Threat::T2,
-                        "asset.text-disguised",
-                        Severity::High,
-                        format!("`.{ext}` {kind} contains text, not {kind} data"),
-                    )
-                    .anchor(blob.oid.clone())
-                    .detail(format!("No valid .{ext} header; {} bytes of mostly printable text", blob.size)),
-                );
+                // Graded by evidence: one code marker is suspicious; plain text is
+                // usually a placeholder (test fixtures, uploads), unless it is large
+                // enough to carry an encoded payload. Anything a task or script
+                // runs is escalated by `t13.payload-wired`.
+                let sev = if markers.len() == 1 {
+                    Severity::High
+                } else if blob.size >= 1024 {
+                    Severity::Medium
+                } else {
+                    Severity::Low
+                };
+                let mut f = Finding::new(
+                    Threat::T2,
+                    "asset.text-disguised",
+                    sev,
+                    format!("`.{ext}` {kind} contains text, not {kind} data"),
+                )
+                .anchor(blob.oid.clone())
+                .detail(format!("No valid .{ext} header; {} bytes of mostly printable text", blob.size));
+                if let Some(m) = markers.first() {
+                    f = f.detail(format!("code marker: {m}"));
+                }
+                out.push(f);
             }
         } else if expected_magic(&ext, b) == Some(false) {
             let guessed = infer::get(b).map(|t| t.mime_type().to_string()).unwrap_or_else(|| "unknown".into());
@@ -199,9 +212,13 @@ mod tests {
     }
 
     #[test]
-    fn plain_text_in_image_is_high() {
-        let f = scan(&DisguisedAsset, &added("logo.png", b"hello this is just some text inside a png file"));
-        assert_eq!(f[0].severity, Severity::High);
+    fn text_in_image_is_graded_by_evidence() {
+        let f = scan(&DisguisedAsset, &added("logo.png", b"fake-image-data"));
+        assert_eq!(f[0].severity, Severity::Low, "small placeholder");
+        let big = "lorem ipsum dolor sit amet ".repeat(60);
+        assert_eq!(scan(&DisguisedAsset, &added("logo.png", big.as_bytes()))[0].severity, Severity::Medium);
+        let one = format!("{big}\nrequire('x')");
+        assert_eq!(scan(&DisguisedAsset, &added("logo.png", one.as_bytes()))[0].severity, Severity::High);
     }
 
     #[test]
