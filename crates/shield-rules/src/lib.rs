@@ -2,6 +2,7 @@
 
 mod agents;
 mod assets;
+mod ci;
 mod gitconfig;
 mod gitmeta;
 mod lifecycle;
@@ -32,6 +33,7 @@ pub fn builtin() -> Vec<Box<dyn Detector>> {
         Box::new(agents::AgentInstructions),
         Box::new(lifecycle::Lifecycle),
         Box::new(shellenv::ShellEnv),
+        Box::new(ci::Ci),
         Box::new(provenance::RefRewritten),
         Box::new(provenance::Impersonation),
         Box::new(provenance::TamperedPayload),

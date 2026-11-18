@@ -562,3 +562,11 @@ fn lifecycle_dropper_is_blocked() {
     assert_eq!(code, 2, "{:#?}", rules(&v));
     assert!(has(&v, "t5.npm.script", "critical", false), "{:#?}", rules(&v));
 }
+
+#[test]
+fn ci_secrets_dump_is_blocked() {
+    let f = fx::ci_secrets_dump();
+    let (code, v) = check_rules(&f);
+    assert_eq!(code, 2, "{:#?}", rules(&v));
+    assert!(has(&v, "t9.workflow.secrets-dump", "critical", false), "{:#?}", rules(&v));
+}

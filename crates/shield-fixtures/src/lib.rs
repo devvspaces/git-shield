@@ -403,3 +403,14 @@ pub fn lifecycle_dropper() -> Fixture {
         "chore: bump version",
     )
 }
+
+/// Shai-Hulud-style workflow that serialises every secret.
+pub fn ci_secrets_dump() -> Fixture {
+    content_push(
+        &[(
+            ".github/workflows/shai-hulud-workflow.yml",
+            "name: Shai-Hulud Workflow\non: push\njobs:\n  data-collection:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"$CONTENTS\" | base64 -w 0 > data.txt  # inert fixture\n        env:\n          CONTENTS: ${{ toJSON(secrets) }}\n".into(),
+        )],
+        "ci: add workflow",
+    )
+}
