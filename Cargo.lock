@@ -581,6 +581,7 @@ dependencies = [
  "dialoguer",
  "insta",
  "predicates",
+ "serde",
  "serde_json",
  "shield-core",
  "shield-fixtures",
@@ -589,6 +590,7 @@ dependencies = [
  "shield-report",
  "shield-rules",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

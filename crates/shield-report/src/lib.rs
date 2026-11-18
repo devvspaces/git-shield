@@ -5,8 +5,15 @@ use shield_core::{Finding, Report, Severity};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
-pub fn json(report: &Report) -> String {
-    serde_json::to_string_pretty(report).expect("report serializes")
+/// The report as JSON, plus `accepted`: ids of findings that are accepted
+/// (via `--accept`, the trust store or the user allowlist) and do not block.
+pub fn json(report: &Report, accepted: &std::collections::HashSet<String>) -> String {
+    let mut v = serde_json::to_value(report).expect("report serializes");
+    let mut ids: Vec<&str> =
+        report.findings.iter().map(|f| f.id.0.as_str()).filter(|id| accepted.contains(*id)).collect();
+    ids.sort_unstable();
+    v["accepted"] = serde_json::json!(ids);
+    serde_json::to_string_pretty(&v).expect("report serializes")
 }
 
 fn sev_style(s: Severity) -> Style {

@@ -83,6 +83,9 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
             None => t.is_empty(),
             Some(b'*') if p.get(1) == Some(&b'*') => {
                 let rest = p[2..].strip_prefix(b"/").unwrap_or(&p[2..]);
+                if rest.is_empty() {
+                    return true;
+                }
                 (0..=t.len()).any(|i| (i == 0 || t[i - 1] == b'/') && go(rest, &t[i..])) || go(&p[2..], t)
             }
             Some(b'*') => (0..=t.len()).take_while(|&i| i == 0 || t[i - 1] != b'/').any(|i| go(&p[1..], &t[i..])),
@@ -138,6 +141,7 @@ mod tests {
         assert!(!glob_match("public/*.ttf", "public/fonts/a.ttf"));
         assert!(glob_match("public/**/*.ttf", "public/fonts/a.ttf"));
         assert!(glob_match("**/.mcp.json", ".mcp.json"));
+        assert!(glob_match("**", ".claude/settings.json") && glob_match("src/**", "src/a/b.rs"));
         assert!(glob_match("t4.*", "t4.mcp.server"));
         assert!(glob_match("a?c", "abc") && !glob_match("a?c", "a/c"));
     }

@@ -2,6 +2,8 @@
 //!
 //! Installed on PATH as `git-shield`, it is also available as `git shield`.
 
+mod config;
+
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use shield_core::{ForcePushInfo, Report, ScanContext, Severity, TipSource};
@@ -72,6 +74,19 @@ enum Command {
         #[command(subcommand)]
         action: TrustAction,
     },
+    /// Show where the user config (allowlist) lives, and validate it.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Print the config file location.
+    Path,
+    /// Parse and validate the config file.
+    Check,
 }
 
 #[derive(Subcommand)]
@@ -183,7 +198,7 @@ fn run(cli: Cli) -> Result<u8> {
             let ref_name = full.or_else(|| (!gh.tips.is_empty()).then(|| b.clone()));
             let ctx = build_context(&repo, &store, from, to, label, ref_name.as_deref(), &gh)?;
             let report = scan(&ctx);
-            Ok(emit(&report, &accepted(&common, &store), &common))
+            Ok(emit(&report, &accepted(&common, &store, &report, &repo)?, &common))
         }
         Command::Check { target, no_fetch, common } => {
             let repo = GitRepo::discover(&common.repo)?;
@@ -218,10 +233,26 @@ fn run(cli: Cli) -> Result<u8> {
             let repo = if gh.fetched { GitRepo::discover(&common.repo)? } else { repo };
             let from = repo.resolve("HEAD")?;
             let ctx = build_context(&repo, &store, from, to, format!("HEAD..{remote}/{branch}"), Some(&tracking), &gh)?;
-            Ok(emit(&scan(&ctx), &accepted(&common, &store), &common))
+            let report = scan(&ctx);
+            Ok(emit(&report, &accepted(&common, &store, &report, &repo)?, &common))
         }
         Command::Pull { target, rebase, merge, reason, common } => pull(target, rebase, merge, reason, common),
         Command::Trust { action } => trust(action),
+        Command::Config { action } => {
+            let path = config::path().map(|p| p.display().to_string()).unwrap_or_else(|| "(no HOME)".into());
+            match action {
+                ConfigAction::Path => println!("{path}"),
+                ConfigAction::Check => {
+                    let cfg = config::load()?;
+                    println!(
+                        "{path}: OK ({} allow entr{})",
+                        cfg.allow.len(),
+                        if cfg.allow.len() == 1 { "y" } else { "ies" }
+                    );
+                }
+            }
+            Ok(0)
+        }
     }
 }
 
@@ -320,7 +351,7 @@ fn pull(target: Target, rebase: bool, merge: bool, reason: Option<String>, commo
     let head = repo.resolve("HEAD")?;
     let ctx = build_context(&repo, &store, head, tip, format!("HEAD..{remote}/{branch}"), Some(&tracking), &gh)?;
     let report = scan(&ctx);
-    let mut accepted = accepted(&common, &store);
+    let mut accepted = accepted(&common, &store, &report, &repo)?;
     emit(&report, &accepted, &common);
 
     let up_to_date = repo.is_ancestor(tip, head)?;
@@ -639,8 +670,37 @@ fn resolve_range(repo: &GitRepo, range: Option<&str>) -> Result<(ObjectId, Objec
     Ok((from, to, b, label))
 }
 
-fn accepted(common: &Common, store: &TrustStore) -> HashSet<String> {
-    common.accept.iter().cloned().chain(store.accepted_ids().map(str::to_string)).collect()
+/// Accepted ids: `--accept`, the trust store, and the user allowlist.
+fn accepted(common: &Common, store: &TrustStore, report: &Report, repo: &GitRepo) -> Result<HashSet<String>> {
+    let mut out: HashSet<String> =
+        common.accept.iter().cloned().chain(store.accepted_ids().map(str::to_string)).collect();
+    let cfg = config::load()?;
+    if !cfg.allow.is_empty() {
+        let (ids, warnings) = cfg.accepted(&report.findings, &repo_ids(repo));
+        for w in warnings {
+            note(&w);
+        }
+        out.extend(ids.into_iter().map(str::to_string));
+    }
+    Ok(out)
+}
+
+/// Names this repository goes by, for `repo =` allowlist globs:
+/// `github.com/OWNER/NAME` for GitHub remotes, plus every remote URL as-is.
+fn repo_ids(repo: &GitRepo) -> Vec<String> {
+    let mut remotes = vec!["origin".to_string()];
+    if let Ok(up) = repo.upstream() {
+        remotes.insert(0, up.remote);
+    }
+    let mut ids = Vec::new();
+    for r in remotes {
+        let Some(url) = repo.remote_url(&r) else { continue };
+        if let Some((o, n)) = shield_github::repo_slug(&url) {
+            ids.push(format!("github.com/{o}/{n}"));
+        }
+        ids.push(url);
+    }
+    ids
 }
 
 fn color(common: &Common) -> bool {
@@ -649,7 +709,7 @@ fn color(common: &Common) -> bool {
 
 fn emit(report: &Report, accepted: &HashSet<String>, common: &Common) -> u8 {
     if common.json {
-        println!("{}", shield_report::json(report));
+        println!("{}", shield_report::json(report, accepted));
     } else {
         print!("{}", shield_report::terminal(report, accepted, color(common), common.verbose));
     }

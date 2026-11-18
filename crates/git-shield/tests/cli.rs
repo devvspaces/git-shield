@@ -13,6 +13,8 @@ fn shield(f: &Fixture) -> Command {
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GS_MARKER", &f.marker)
         .env("GIT_SHIELD_HOME", shield_home(f))
+        // Never pick up the developer's real allowlist.
+        .env("GIT_SHIELD_CONFIG", f.dir.path().join("no-config.toml"))
         .env_remove("XDG_DATA_HOME")
         // Identity for commits git itself creates (rebase / merge).
         .env("GIT_AUTHOR_NAME", "Victim")
@@ -44,12 +46,16 @@ fn json_pull(f: &Fixture, extra: &[&str]) -> (i32, Value, String) {
     (code, v, String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
+/// High/Critical findings that are not accepted.
 fn blocking_ids(v: &Value) -> Vec<String> {
+    let accepted: Vec<&str> =
+        v["accepted"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
     v["findings"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|f| matches!(f["severity"].as_str(), Some("high" | "critical")))
+        .filter(|f| !accepted.contains(&f["id"].as_str().unwrap_or("")))
         .map(|f| f["id"].as_str().unwrap().to_string())
         .collect()
 }
@@ -585,4 +591,60 @@ fn agent_hook_wires_the_disguised_payload() {
     let f = fx::agent_hook();
     let (_, v) = check_rules(&f);
     assert!(has(&v, "t13.payload-wired", "critical", false), "{:#?}", rules(&v));
+}
+
+// ---- user allowlist ----
+
+fn with_config(f: &Fixture, toml: &str, args: &[&str]) -> (i32, Value, String) {
+    let cfg = f.dir.path().join("config.toml");
+    std::fs::write(&cfg, toml).unwrap();
+    let out = shield(f).env("GIT_SHIELD_CONFIG", &cfg).args(["check", "--json"]).args(args).output().unwrap();
+    let v = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+    (out.status.code().unwrap_or(-1), v, String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+#[test]
+fn allowlist_accepts_a_reviewed_high_finding() {
+    let f = fx::content_push(
+        &[(
+            ".claude/settings.json",
+            r#"{"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":"npx prettier --write ."}]}]}}"#.into(),
+        )],
+        "chore: format hook",
+    );
+    let (code, v) = check_rules(&f);
+    assert_eq!(code, 2, "{:#?}", rules(&v));
+    let entry =
+        "[[allow]]\nrule = \"t4.agent.command\"\npath = \".claude/settings.json\"\nreason = \"our formatter hook\"\n";
+    let (code, v, err) = with_config(&f, entry, &[]);
+    assert_eq!(code, 1, "{err}\n{:#?}", rules(&v));
+    // A repo glob that does not match leaves it blocked.
+    let other = format!("{entry}repo = \"github.com/someone-else/*\"\n");
+    assert_eq!(with_config(&f, &other, &[]).0, 2);
+    assert!(!f.marker_exists());
+}
+
+#[test]
+fn allowlist_needs_a_pinned_blob_for_critical() {
+    let f = fx::agent_hook();
+    let (_, v, err) = with_config(&f, "[[allow]]\nrule = \"t4.*\"\npath = \"**\"\nreason = \"trust me\"\n", &[]);
+    let crit = finding(&v, "t4.agent.command").expect("hook finding");
+    assert_eq!(crit["severity"], "critical");
+    assert!(blocking_ids(&v).contains(&crit["id"].as_str().unwrap().to_string()));
+    assert!(err.contains("does not pin `blob`"), "{err}");
+
+    let anchor = crit["anchor"].as_str().unwrap();
+    let pinned =
+        format!("[[allow]]\nrule = \"t4.agent.command\"\nblob = \"{}\"\nreason = \"reviewed\"\n", &anchor[..40]);
+    let (_, v, _) = with_config(&f, &pinned, &[]);
+    assert!(!blocking_ids(&v).contains(&crit["id"].as_str().unwrap().to_string()));
+    assert!(!f.marker_exists());
+}
+
+#[test]
+fn invalid_config_is_an_error() {
+    let f = fx::clean_fast_forward();
+    let (code, _, err) = with_config(&f, "[[allow]]\nrule = \"x\"\nreason = \"\"\n", &[]);
+    assert_eq!(code, 3);
+    assert!(err.contains("non-empty reason"), "{err}");
 }
