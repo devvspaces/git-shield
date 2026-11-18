@@ -648,3 +648,19 @@ fn invalid_config_is_an_error() {
     assert_eq!(code, 3);
     assert!(err.contains("non-empty reason"), "{err}");
 }
+
+#[test]
+fn own_local_rewrites_are_not_reported() {
+    let f = fx::clean_fast_forward();
+    let home = fx::home(&f);
+    // The user amends their own commit: HEAD's reflog now holds a "dropped" tip.
+    std::fs::write(f.local.join("notes.txt"), "local notes\n").unwrap();
+    fx::git(&f.local, &home, &["add", "notes.txt"]);
+    fx::git(&f.local, &home, &["commit", "-q", "-m", "Add notes"]);
+    fx::git(&f.local, &home, &["commit", "-q", "--amend", "-m", "Add notes (reworded)"]);
+    let out = shield(&f).args(["scan", "HEAD~1..HEAD", "--json"]).output().unwrap();
+    let v: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+    assert!(finding(&v, "t10.ref-rewritten").is_none(), "{:#?}", rules(&v));
+    assert!(finding(&v, "t11.rewritten-copy").is_none(), "{:#?}", rules(&v));
+}

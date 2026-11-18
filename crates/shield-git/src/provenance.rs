@@ -138,7 +138,10 @@ impl GitRepo {
         // after a malicious force-push, or force-pushing their own rebase). Those
         // were dropped on purpose and must not be reported as rewrites.
         let mut replaced_by_user: Vec<ObjectId> = Vec::new();
-        if let Ok(r) = self.repo().find_reference(input.ref_name) {
+        // Only remote-tracking refs: a local branch's reflog is the user's own
+        // amends and rebases, which are not attacks.
+        let remote_tracking = input.ref_name.starts_with("refs/remotes/");
+        if remote_tracking && let Ok(r) = self.repo().find_reference(input.ref_name) {
             let mut platform = r.log_iter();
             if let Some(lines) = platform.all().map_err(git_err)? {
                 for line in lines {
