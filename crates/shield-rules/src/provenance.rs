@@ -2,7 +2,7 @@
 //!
 //! Signals come from the scanned ref's previous tips (pre-fetch value, reflog,
 //! trust store) and from the incoming commit objects themselves. Signature
-//! *presence* only; cryptographic verification is Phase 5.
+//! *presence* only here; cryptographic checks live in `signing.rs`.
 
 use shield_core::{CommitInfo, Detector, Finding, ScanContext, Severity, Threat};
 use std::collections::{HashMap, HashSet};
@@ -195,11 +195,16 @@ fn rewritten_copies(ctx: &ScanContext, p: &shield_core::Provenance, out: &mut Ve
 /// One finding per (committer, problem), so a long range with many forged
 /// merges stays readable and one `--accept` covers one impersonator. Commits
 /// already reported as rewritten copies are skipped (that finding is stronger).
+/// GitHub already answered for this merge commit (`t11.pr-merge-mismatch`), a stronger signal.
+fn pr_checked(out: &[Finding], id: &str) -> bool {
+    out.iter().any(|f| f.rule == "t11.pr-merge-mismatch" && f.commit.as_deref() == Some(id))
+}
+
 fn github_merges(ctx: &ScanContext, skip: &HashSet<String>, out: &mut Vec<Finding>) {
     // (committer email, unsigned-by-github?) → commits, newest first (ctx order).
     let mut groups: Vec<((String, bool), Vec<&CommitInfo>)> = Vec::new();
     for c in &ctx.commits {
-        if !c.summary.starts_with("Merge pull request #") || skip.contains(&c.id) {
+        if !c.summary.starts_with("Merge pull request #") || skip.contains(&c.id) || pr_checked(out, &c.id) {
             continue;
         }
         let by_github = c.committer_email.eq_ignore_ascii_case(GITHUB_EMAIL);

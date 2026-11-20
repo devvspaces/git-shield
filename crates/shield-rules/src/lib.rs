@@ -12,7 +12,9 @@ mod paths;
 mod provenance;
 mod shellenv;
 mod signatures;
+mod signing;
 pub(crate) mod util;
+pub use signing::claimed_pr;
 mod vscode;
 
 use shield_core::Detector;
@@ -41,7 +43,9 @@ pub fn builtin() -> Vec<Box<dyn Detector>> {
         // Context steps: correlation over the file findings above.
         Box::new(obfuscation::PayloadWired),
         Box::new(provenance::RefRewritten),
+        Box::new(signing::Signatures),
         Box::new(provenance::Impersonation),
+        Box::new(signing::PushAttribution),
         Box::new(provenance::TamperedPayload),
     ]
 }
