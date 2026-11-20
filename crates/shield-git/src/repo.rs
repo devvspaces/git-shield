@@ -23,7 +23,7 @@ pub struct Upstream {
 }
 
 pub struct GitRepo {
-    repo: gix::Repository,
+    pub(crate) repo: gix::Repository,
 }
 
 impl GitRepo {
@@ -151,6 +151,7 @@ impl GitRepo {
             commits,
             local: Some(local::read_local_state(self)?),
             provenance: None,
+            attest: None,
         })
     }
 

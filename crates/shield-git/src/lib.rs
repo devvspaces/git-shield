@@ -11,6 +11,7 @@ pub mod hardened;
 mod local;
 mod provenance;
 mod repo;
+pub mod signing;
 pub mod trust;
 
 pub use gix::hash::ObjectId;

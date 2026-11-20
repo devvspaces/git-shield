@@ -126,6 +126,8 @@ pub struct ScanContext {
     pub local: Option<LocalRepoState>,
     /// History facts about the ref being scanned (rewrites, committer habits).
     pub provenance: Option<Provenance>,
+    /// What signatures and GitHub say about the incoming commits.
+    pub attest: Option<Attestations>,
 }
 
 /// Where git-shield learned about a previous tip of the scanned ref.
@@ -198,4 +200,88 @@ pub struct Provenance {
     pub parent_times: HashMap<String, i64>,
     /// "Now" in unix seconds (injected so tests are deterministic).
     pub now: i64,
+}
+
+/// Format of a commit signature, from its armor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigFormat {
+    Gpg,
+    Ssh,
+    X509,
+    Unknown,
+}
+
+/// Outcome of verifying one commit signature locally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SigStatus {
+    /// Valid, and made by a key the verifier trusts for this signer.
+    Good {
+        signer: String,
+    },
+    /// Cryptographically intact, but the key is not tied to anyone (SSH without allowed signers).
+    Intact,
+    /// The signature does not match the commit: altered or forged.
+    Bad(String),
+    /// Valid-looking, but the key is not in any keyring / allowed-signers file.
+    NoKey,
+    Expired,
+    Revoked,
+    /// Could not check (tool missing, timeout, unsupported format).
+    Unchecked(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SigCheck {
+    pub format: SigFormat,
+    pub status: SigStatus,
+    /// Checked against GitHub's web-flow key (the commit claims GitHub as committer).
+    pub web_flow: bool,
+}
+
+/// GitHub's verdict on a commit (`commit.verification` in the API).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteVerification {
+    pub verified: bool,
+    pub reason: String,
+    pub author_login: Option<String>,
+    pub committer_login: Option<String>,
+}
+
+/// A pull request's state on GitHub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrState {
+    Merged { merge_commit_sha: String },
+    Open,
+    ClosedUnmerged,
+    NotFound,
+}
+
+/// The GitHub push that first brought an incoming commit onto the branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushedBy {
+    pub login: String,
+    /// `push`, `force_push`, `pr_merge`, `merge_queue_merge`, ...
+    pub kind: String,
+    /// Unix seconds.
+    pub at: i64,
+}
+
+/// Signature and GitHub facts about incoming commits (keyed by full commit id).
+/// Every map may be partial: absent means "not checked", never "fine".
+#[derive(Debug, Clone, Default)]
+pub struct Attestations {
+    pub local: HashMap<String, SigCheck>,
+    pub github: HashMap<String, RemoteVerification>,
+    pub prs: HashMap<u64, PrState>,
+    pub pushes: HashMap<String, PushedBy>,
+    /// The user's config requires signed commits for this repository.
+    pub require_signed: bool,
+}
+
+impl Attestations {
+    /// Did any trusted source confirm this commit's signature?
+    pub fn confirmed(&self, id: &str) -> bool {
+        self.github.get(id).is_some_and(|v| v.verified)
+            || matches!(self.local.get(id), Some(SigCheck { status: SigStatus::Good { .. }, .. }))
+    }
 }
