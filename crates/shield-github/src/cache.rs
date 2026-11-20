@@ -17,6 +17,9 @@ pub struct Cache {
     /// PR number → merge commit sha (merged PRs only).
     #[serde(default)]
     pulls: BTreeMap<u64, String>,
+    /// `base...head` ranges already compared (commit ids never change meaning).
+    #[serde(default)]
+    ranges: std::collections::BTreeSet<String>,
     #[serde(skip)]
     path: Option<PathBuf>,
     #[serde(skip)]
@@ -73,6 +76,16 @@ impl Cache {
         }
     }
 
+    pub fn compared(&self, base: &str, head: &str) -> bool {
+        self.ranges.contains(&format!("{base}...{head}"))
+    }
+
+    pub fn put_compared(&mut self, base: &str, head: &str) {
+        if self.ranges.insert(format!("{base}...{head}")) {
+            self.dirty = true;
+        }
+    }
+
     /// Write back if anything changed. Errors are ignored: the cache is an optimisation.
     pub fn save(&mut self) {
         let Some(path) = &self.path else { return };
@@ -110,12 +123,14 @@ mod tests {
         c.put_commit(&rc("b", false, "unknown_key")); // may change later: not cached
         c.put_pull(7, &PullState::Merged { merge_commit_sha: "m".into() });
         c.put_pull(8, &PullState::Open);
+        c.put_compared("a", "b");
         c.save();
 
         let back: Cache = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert!(back.commit("a").is_some() && back.commit("b").is_none());
         assert_eq!(back.pull(7), Some(PullState::Merged { merge_commit_sha: "m".into() }));
         assert_eq!(back.pull(8), None);
+        assert!(back.compared("a", "b") && !back.compared("b", "a"));
 
         std::fs::write(&path, b"{not json").unwrap();
         let broken: Option<Cache> = serde_json::from_slice(&std::fs::read(&path).unwrap()).ok();

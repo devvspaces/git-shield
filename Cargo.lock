@@ -581,6 +581,7 @@ dependencies = [
  "dialoguer",
  "insta",
  "predicates",
+ "rayon",
  "serde",
  "serde_json",
  "shield-core",

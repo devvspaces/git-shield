@@ -69,7 +69,7 @@ fn pr_merges(ctx: &ScanContext, a: &Attestations, out: &mut Vec<Finding>) {
         };
         let genuine = web_flow_signed(a, c);
         let (sev, title) = if genuine {
-            (Severity::Low, format!("Merge commit {} names PR #{n} of another repository", short(&c.id)))
+            (Severity::Low, format!("GitHub merge commit {} does not match PR #{n}'s record", short(&c.id)))
         } else {
             (Severity::Critical, format!("Commit {} claims to merge PR #{n}, but GitHub disagrees", short(&c.id)))
         };
@@ -81,8 +81,8 @@ fn pr_merges(ctx: &ScanContext, a: &Attestations, out: &mut Vec<Finding>) {
             .detail(format!("Committer: {} <{}>", c.committer_name, c.committer_email));
         if genuine {
             f = f.detail(
-                "It is signed by GitHub, so it is a real GitHub merge, most likely from an upstream or fork \
-                 whose PR numbers differ.",
+                "It is signed by GitHub, so GitHub created it: not a forgery. The PR may have been merged and \
+                 later rewritten away, or the merge came from another repository with different PR numbers.",
             );
         } else {
             f = f.detail(

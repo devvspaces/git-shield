@@ -26,12 +26,14 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 tempfile = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 shield-fixtures = { path = "../shield-fixtures" }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile = { workspace = true }
+rayon = { workspace = true }
 serde_json = { workspace = true }
 insta = { workspace = true }
 

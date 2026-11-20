@@ -314,7 +314,7 @@ pub struct FakeGitHub {
 }
 
 /// `routes`: (path, status, JSON body). Unknown paths get 404.
-pub fn fake_github(routes: Vec<(&'static str, u16, String)>) -> FakeGitHub {
+pub fn fake_github(routes: Vec<(String, u16, String)>) -> FakeGitHub {
     use std::io::{BufRead, BufReader, Write as _};
     use std::sync::atomic::Ordering;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -357,6 +357,73 @@ pub fn force_push_json(before: &str, after: &str, actor: &str, timestamp: &str) 
     format!(
         r#"{{"id":1,"before":"{before}","after":"{after}","ref":"refs/heads/dev","timestamp":"{timestamp}","activity_type":"force_push","actor":{{"login":"{actor}"}}}}"#
     )
+}
+
+/// One activity-log entry of any kind (`push`, `pr_merge`, ...).
+pub fn push_json(before: &str, after: &str, actor: &str, timestamp: &str, kind: &str) -> String {
+    format!(
+        r#"{{"id":1,"before":"{before}","after":"{after}","ref":"refs/heads/dev","timestamp":"{timestamp}","activity_type":"{kind}","actor":{{"login":"{actor}"}}}}"#
+    )
+}
+
+/// A compare response: (sha, verified, reason, committer login).
+pub fn compare_json(commits: &[(&str, bool, &str, Option<&str>)]) -> String {
+    let items: Vec<String> = commits
+        .iter()
+        .map(|(sha, verified, reason, committer)| {
+            let committer = committer.map(|l| format!(r#"{{"login":"{l}"}}"#)).unwrap_or_else(|| "null".into());
+            format!(
+                r#"{{"sha":"{sha}","commit":{{"verification":{{"verified":{verified},"reason":"{reason}"}}}},"author":null,"committer":{committer}}}"#
+            )
+        })
+        .collect();
+    format!(r#"{{"total_commits":{},"commits":[{}]}}"#, commits.len(), items.join(","))
+}
+
+/// A pull request: merged into `merge_sha`, or open when `None`.
+pub fn pr_json(merge_sha: Option<&str>) -> String {
+    match merge_sha {
+        Some(sha) => format!(
+            r#"{{"state":"closed","merged":true,"merged_at":"2026-08-01T10:00:00Z","merge_commit_sha":"{sha}"}}"#
+        ),
+        None => r#"{"state":"open","merged":false,"merged_at":null,"merge_commit_sha":"0000"}"#.into(),
+    }
+}
+
+/// A teammate pushes an SSH-signed commit; with `tamper`, its message is
+/// changed afterwards while the signature is kept. `None` if `ssh-keygen` is
+/// unavailable. The public key is at `<dir>/signer.pub`.
+pub fn ssh_signed_push(tamper: bool) -> Option<Fixture> {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, home, origin, local) = base(&dir);
+    let pusher = root.join("pusher");
+    let key = root.join("signer");
+    let ok = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "signer", "-f"])
+        .arg(&key)
+        .stdin(Stdio::null())
+        .status()
+        .ok()?
+        .success();
+    if !ok {
+        return None;
+    }
+    write(&pusher, "app/views.py", python_module("views").replace("* 7\n", "* 7 + 1\n"));
+    let signing_key = format!("user.signingkey={}", key.display());
+    git_as(
+        &pusher,
+        &home,
+        &["-c", "gpg.format=ssh", "-c", &signing_key, "commit", "-q", "-S", "-am", "Fix total for handler 7"],
+        &EMEKA,
+        &EMEKA,
+    );
+    if tamper {
+        let raw = git(&pusher, &home, &["cat-file", "commit", "HEAD"]);
+        let forged = write_raw_commit(&pusher, &home, &format!("{}\n", raw.replace("handler 7", "handler 8")));
+        git(&pusher, &home, &["reset", "-q", "--hard", &forged]);
+    }
+    git(&pusher, &home, &["push", "-q", "origin", "dev"]);
+    Some(finish(dir, origin, local))
 }
 
 /// A teammate account pushes one commit adding/changing `files`.

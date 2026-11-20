@@ -31,7 +31,7 @@ fn check(area: &str, status: Status, message: impl Into<String>, fix: Option<&st
 
 /// `git config --global --get <key>`, run from an empty temp dir so no
 /// repository's config (or fsmonitor) is involved.
-fn git_global(key: &str) -> Option<String> {
+pub(crate) fn git_global(key: &str) -> Option<String> {
     let dir = tempfile::tempdir().ok()?;
     let out = Command::new("git")
         .current_dir(dir.path())

@@ -214,8 +214,10 @@ impl Client {
         Ok(out)
     }
 
-    /// Commits in `base...head` as GitHub sees them (oldest first), and the
-    /// total GitHub reports (more than returned when the page cap was hit).
+    /// Commits in `base...head` as GitHub sees them, and the total GitHub
+    /// reports. GitHub pages oldest first; when the range is longer than
+    /// [`MAX_PAGES`] pages, the first page and then the newest pages are
+    /// fetched, since the newest commits matter most.
     pub fn compare(
         &self,
         owner: &str,
@@ -223,26 +225,34 @@ impl Client {
         base: &str,
         head: &str,
     ) -> Result<(Vec<RemoteCommit>, usize), String> {
-        let mut out = Vec::new();
-        let mut total = 0;
-        for page in 1..=MAX_PAGES {
+        let page = |n: usize| -> Result<(Vec<RemoteCommit>, usize), String> {
             let url = format!(
-                "{}/repos/{owner}/{name}/compare/{}...{}?per_page=100&page={page}",
+                "{}/repos/{owner}/{name}/compare/{}...{}?per_page=100&page={n}",
                 self.base,
                 encode(base),
                 encode(head)
             );
-            let (body, link) = self.get(&url)?;
-            let (commits, t) = parse_compare(&body)?;
-            total = total.max(t);
-            let n = commits.len();
-            out.extend(commits);
-            if n < 100 || out.len() >= total || link.as_deref().and_then(next_link).is_none() {
+            parse_compare(&self.get(&url)?.0)
+        };
+        let (mut out, total) = page(1)?;
+        let pages = total.div_ceil(100);
+        let rest: Vec<usize> =
+            if pages <= MAX_PAGES { (2..=pages).collect() } else { (pages + 2 - MAX_PAGES..=pages).collect() };
+        for n in rest {
+            let (v, _) = page(n)?;
+            if v.is_empty() {
                 break;
             }
+            out.extend(v);
         }
         let total = total.max(out.len());
         Ok((out, total))
+    }
+
+    /// Can the token see this repository? (GitHub answers 404 for private
+    /// repositories it cannot access, so a 404 elsewhere means nothing without this.)
+    pub fn repo_visible(&self, owner: &str, name: &str) -> bool {
+        matches!(self.get_status(&format!("{}/repos/{owner}/{name}", self.base)), Ok((200, _, _)))
     }
 
     /// State of pull request `number`.

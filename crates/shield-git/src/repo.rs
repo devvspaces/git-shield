@@ -190,6 +190,16 @@ impl GitRepo {
         })
     }
 
+    /// Ids reachable from `tip` but not from `hide`, newest first, at most `limit`.
+    pub fn commit_ids(&self, tip: ObjectId, hide: Option<ObjectId>, limit: usize) -> Result<Vec<ObjectId>> {
+        let walk = self.repo.rev_walk([tip]).with_hidden(hide).all().map_err(git_err)?;
+        let mut out = Vec::new();
+        for info in walk.take(limit) {
+            out.push(info.map_err(git_err)?.id);
+        }
+        Ok(out)
+    }
+
     /// Commits reachable from `to` and not from `from`, newest first.
     pub fn commit_range(&self, from: ObjectId, to: ObjectId) -> Result<Vec<CommitInfo>> {
         let walk = self.repo.rev_walk([to]).with_hidden([from]).all().map_err(git_err)?;

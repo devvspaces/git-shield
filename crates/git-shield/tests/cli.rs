@@ -16,6 +16,7 @@ fn shield(f: &Fixture) -> Command {
         // Never pick up the developer's real allowlist.
         .env("GIT_SHIELD_CONFIG", f.dir.path().join("no-config.toml"))
         .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CACHE_HOME")
         // Identity for commits git itself creates (rebase / merge).
         .env("GIT_AUTHOR_NAME", "Victim")
         .env("GIT_AUTHOR_EMAIL", "victim@example.com")
@@ -392,12 +393,12 @@ fn github(f: &Fixture, gh: &fx::FakeGitHub, args: &[&str]) -> (i32, Value, Strin
     (out.status.code().unwrap_or(-1), v, String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
-fn activity(events: &[String]) -> (&'static str, u16, String) {
-    ("/repos/o/r/activity", 200, format!("[{}]", events.join(",")))
+fn activity(events: &[String]) -> (String, u16, String) {
+    ("/repos/o/r/activity".into(), 200, format!("[{}]", events.join(",")))
 }
 
-fn viewer(login: &str) -> (&'static str, u16, String) {
-    ("/user", 200, format!(r#"{{"login":"{login}"}}"#))
+fn viewer(login: &str) -> (String, u16, String) {
+    ("/user".into(), 200, format!(r#"{{"login":"{login}"}}"#))
 }
 
 fn finding<'a>(v: &'a Value, rule: &str) -> Option<&'a Value> {
@@ -473,7 +474,7 @@ fn unknown_replaced_tip_is_still_reported() {
 #[test]
 fn github_errors_degrade_to_offline() {
     let (f, _, _) = incident_without_local_memory();
-    let gh = fx::fake_github(vec![("/user", 500, r#"{"message":"boom"}"#.into())]);
+    let gh = fx::fake_github(vec![("/user".into(), 500, r#"{"message":"boom"}"#.into())]);
     let (code, v, err) = github(&f, &gh, &[]);
     assert_eq!(code, 1, "{err}\n{:#?}", rules(&v));
     assert!(err.contains("note: GitHub returned HTTP 500 boom"), "{err}");
@@ -829,4 +830,151 @@ fn installed_shell_function_routes_git_pull_through_the_gate() {
     assert_eq!(out.status.code(), Some(0));
     assert!(!std::fs::read_to_string(&rc).unwrap().contains("git-shield"));
     assert!(!f.marker_exists());
+}
+
+// ---- Phase 4: commit verification, PR merge commits, signatures ----
+
+/// The incoming range of `incident_without_local_memory` as GitHub would
+/// compare it: (base, tip, forged merge, cleanup commit).
+fn incident_range(f: &Fixture) -> (String, String, String, String) {
+    let home = fx::home(f);
+    let tip = fx::git(&f.local, &home, &["rev-parse", "origin/dev"]);
+    let base = fx::git(&f.local, &home, &["merge-base", "HEAD", "origin/dev"]);
+    let forged = fx::git(&f.local, &home, &["rev-parse", "origin/dev^"]);
+    (base, tip.clone(), forged, tip)
+}
+
+fn compare_route(base: &str, tip: &str, body: String) -> (String, u16, String) {
+    (format!("/repos/o/r/compare/{base}...{tip}"), 200, body)
+}
+
+fn pull_route(n: u64, body: String) -> (String, u16, String) {
+    (format!("/repos/o/r/pulls/{n}"), 200, body)
+}
+
+#[test]
+fn forged_pr_merge_is_critical_even_on_a_first_pull() {
+    // The done-when case of Phase 4: force-push by mallory, and the merge commit
+    // is not PR #2921's real merge.
+    let (f, real, forged) = incident_without_local_memory();
+    let (base, tip, forged_merge, cleanup) = incident_range(&f);
+    assert_eq!(forged, forged_merge);
+    let gh = fx::fake_github(vec![
+        viewer("victim"),
+        activity(&[fx::force_push_json(&real, &forged, "mallory", "2026-08-01T10:00:00Z")]),
+        compare_route(
+            &base,
+            &tip,
+            fx::compare_json(&[(&forged, false, "unsigned", None), (&cleanup, false, "unsigned", None)]),
+        ),
+        pull_route(2921, fx::pr_json(Some(&real))),
+    ]);
+    let (code, v, err) = github(&f, &gh, &[]);
+    assert_eq!(code, 2, "{err}\n{:#?}", rules(&v));
+    let m = finding(&v, "t11.pr-merge-mismatch").unwrap_or_else(|| panic!("{err}\n{:#?}", rules(&v)));
+    assert_eq!(m["severity"], "critical");
+    assert_eq!(m["commit"], forged.as_str());
+    let d = m["details"].to_string();
+    assert!(d.contains(&format!("GitHub's merge commit for PR #2921 is {}", &real[..9])), "{m:#}");
+    assert!(d.contains("direct force-push by @mallory"), "{m:#}");
+    assert!(d.contains("Arrived in a force-push by @mallory"), "{m:#}");
+    assert!(!f.marker_exists());
+}
+
+#[test]
+fn matching_pr_merge_is_silent_and_cached() {
+    let (f, _, forged) = incident_without_local_memory();
+    let (base, tip, _, cleanup) = incident_range(&f);
+    let gh = fx::fake_github(vec![
+        viewer("victim"),
+        activity(&[]),
+        compare_route(
+            &base,
+            &tip,
+            fx::compare_json(&[(&forged, false, "unsigned", None), (&cleanup, false, "unsigned", None)]),
+        ),
+        // Pretend GitHub really merged this commit.
+        pull_route(2921, fx::pr_json(Some(&forged))),
+    ]);
+    let (_, v, err) = github(&f, &gh, &[]);
+    assert!(finding(&v, "t11.pr-merge-mismatch").is_none(), "{err}\n{:#?}", rules(&v));
+    let first = gh.hits.load(std::sync::atomic::Ordering::SeqCst);
+    let (_, v2, _) = github(&f, &gh, &[]);
+    let second = gh.hits.load(std::sync::atomic::Ordering::SeqCst) - first;
+    // compare and the merged PR come from the cache the second time.
+    assert!(second + 2 <= first, "first run {first} requests, second {second}");
+    assert_eq!(rules(&v), rules(&v2));
+}
+
+#[test]
+fn unknown_or_open_pr_is_critical_but_not_when_github_is_unreachable() {
+    let (f, real, forged) = incident_without_local_memory();
+    let (base, tip, _, cleanup) = incident_range(&f);
+    let cmp = fx::compare_json(&[(&forged, false, "unsigned", None), (&cleanup, false, "unsigned", None)]);
+    // No pulls route: GitHub answers 404 for PR #2921.
+    let gh = fx::fake_github(vec![viewer("victim"), activity(&[]), compare_route(&base, &tip, cmp.clone())]);
+    let (_, v, _) = github(&f, &gh, &[]);
+    let m = finding(&v, "t11.pr-merge-mismatch").expect("not found PR");
+    assert!(m["details"].to_string().contains("does not exist"), "{m:#}");
+
+    let gh = fx::fake_github(vec![
+        viewer("victim"),
+        activity(&[]),
+        compare_route(&base, &tip, cmp),
+        pull_route(2921, fx::pr_json(None)),
+    ]);
+    let (_, v, _) = github(&f, &gh, &[]);
+    assert!(finding(&v, "t11.pr-merge-mismatch").unwrap()["details"].to_string().contains("still open"));
+
+    // compare fails (e.g. no access): a 404 on the PR proves nothing, so no finding.
+    let gh = fx::fake_github(vec![
+        viewer("victim"),
+        activity(&[fx::force_push_json(&real, &forged, "mallory", "2026-08-01T10:00:00Z")]),
+        (format!("/repos/o/r/compare/{base}...{tip}"), 500, r#"{"message":"boom"}"#.into()),
+    ]);
+    let (code, v, err) = github(&f, &gh, &[]);
+    assert_eq!(code, 2);
+    assert!(finding(&v, "t11.pr-merge-mismatch").is_none(), "{:#?}", rules(&v));
+    assert!(err.contains("pull requests not checked"), "{err}");
+}
+
+#[test]
+fn required_signatures_block_unsigned_commits() {
+    let f = fx::clean_fast_forward();
+    let (code, v, _) = with_config(&f, "[[signing]]\nrepo = \"**\"\nrequire = true\n", &[]);
+    assert_eq!(code, 2, "{:#?}", rules(&v));
+    let r = finding(&v, "t11.unsigned-required").expect("required");
+    assert_eq!(r["severity"], "high");
+    // Without the policy the same pull is clean.
+    assert_eq!(json_check(&f, &[]).0, 0);
+}
+
+#[test]
+fn ssh_signatures_are_verified() {
+    let Some(good) = fx::ssh_signed_push(false) else {
+        eprintln!("ssh-keygen unavailable; skipped");
+        return;
+    };
+    let (code, v) = json_check(&good, &[]);
+    assert_eq!(code, 0, "{:#?}", rules(&v));
+
+    // With an allowed-signers file and `require`, the good signature passes.
+    let pubkey = std::fs::read_to_string(good.dir.path().join("signer.pub")).unwrap();
+    let signers = good.dir.path().join("allowed_signers");
+    std::fs::write(&signers, format!("emeka@example.com {pubkey}")).unwrap();
+    let (code, v, err) = with_config(
+        &good,
+        &format!("[[signing]]\nrepo = \"**\"\nrequire = true\nallowed_signers = \"{}\"\n", signers.display()),
+        &["--no-fetch"],
+    );
+    assert_eq!(code, 0, "{err}\n{:#?}", rules(&v));
+
+    let bad = fx::ssh_signed_push(true).unwrap();
+    let (code, v) = json_check(&bad, &[]);
+    assert_eq!(code, 2, "{:#?}", rules(&v));
+    let b = finding(&v, "t11.signature-bad").expect("bad signature");
+    assert_eq!(b["severity"], "high");
+    // Opting out of local verification removes it.
+    let (_, v) = json_check(&bad, &["--no-fetch", "--no-verify-signatures"]);
+    assert!(finding(&v, "t11.signature-bad").is_none());
 }

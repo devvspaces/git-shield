@@ -17,6 +17,8 @@ use std::collections::BTreeSet;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// GitHub's web-flow signing keys (from <https://github.com/web-flow.gpg>), dearmored.
@@ -70,7 +72,8 @@ pub struct Verifier {
     tmp: tempfile::TempDir,
     keyring: PathBuf,
     allowed_signers: Option<PathBuf>,
-    pub notes: BTreeSet<String>,
+    notes: Mutex<BTreeSet<String>>,
+    counter: AtomicUsize,
 }
 
 impl Verifier {
@@ -84,12 +87,23 @@ impl Verifier {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(tmp.path().join("gnupg"), std::fs::Permissions::from_mode(0o700))?;
         }
-        Ok(Verifier { tmp, keyring, allowed_signers, notes: BTreeSet::new() })
+        Ok(Verifier { tmp, keyring, allowed_signers, notes: Mutex::default(), counter: AtomicUsize::new(0) })
     }
 
     /// Verify one signature. `committer_email` is the identity an SSH
     /// signature must belong to (allowed-signers principal).
-    pub fn verify(&mut self, s: &SignedCommit, committer_email: &str) -> SigCheck {
+    /// Why some signatures could not be checked (one line per cause).
+    pub fn notes(&self) -> Vec<String> {
+        self.notes.lock().map(|n| n.iter().cloned().collect()).unwrap_or_default()
+    }
+
+    fn note(&self, msg: String) {
+        if let Ok(mut n) = self.notes.lock() {
+            n.insert(msg);
+        }
+    }
+
+    pub fn verify(&self, s: &SignedCommit, committer_email: &str) -> SigCheck {
         let web_flow = committer_email.eq_ignore_ascii_case(GITHUB_EMAIL);
         let status = match (s.format, web_flow) {
             (SigFormat::Gpg, true) => self.gpgv_web_flow(s),
@@ -103,18 +117,19 @@ impl Verifier {
         SigCheck { format: s.format, status, web_flow }
     }
 
-    fn files(&self, s: &SignedCommit) -> Option<(PathBuf, PathBuf)> {
-        let sig = self.tmp.path().join("sig");
-        let payload = self.tmp.path().join("payload");
-        std::fs::write(&sig, &s.signature).ok()?;
-        std::fs::write(&payload, &s.payload).ok()?;
-        Some((sig, payload))
+    fn files(&self, s: &SignedCommit) -> Option<TempPair> {
+        let n = self.counter.fetch_add(1, Ordering::Relaxed);
+        let pair = TempPair(self.tmp.path().join(format!("sig{n}")), self.tmp.path().join(format!("payload{n}")));
+        std::fs::write(&pair.0, &s.signature).ok()?;
+        std::fs::write(&pair.1, &s.payload).ok()?;
+        Some(pair)
     }
 
-    fn gpgv_web_flow(&mut self, s: &SignedCommit) -> SigStatus {
-        let Some((sig, payload)) = self.files(s) else { return SigStatus::Unchecked("temp files".into()) };
+    fn gpgv_web_flow(&self, s: &SignedCommit) -> SigStatus {
+        let Some(files) = self.files(s) else { return SigStatus::Unchecked("temp files".into()) };
+        let (sig, payload) = (&files.0, &files.1);
         let mut cmd = Command::new("gpgv");
-        cmd.arg("--status-fd").arg("1").arg("--keyring").arg(&self.keyring).arg(&sig).arg(&payload);
+        cmd.arg("--status-fd").arg("1").arg("--keyring").arg(&self.keyring).arg(sig).arg(payload);
         cmd.env("GNUPGHOME", self.tmp.path().join("gnupg"));
         match self.run(cmd, None, "gpgv") {
             Some((_, out, _)) => gpg_status(&out),
@@ -122,23 +137,25 @@ impl Verifier {
         }
     }
 
-    fn gpg_user(&mut self, s: &SignedCommit) -> SigStatus {
-        let Some((sig, payload)) = self.files(s) else { return SigStatus::Unchecked("temp files".into()) };
+    fn gpg_user(&self, s: &SignedCommit) -> SigStatus {
+        let Some(files) = self.files(s) else { return SigStatus::Unchecked("temp files".into()) };
+        let (sig, payload) = (&files.0, &files.1);
         let mut cmd = Command::new("gpg");
         cmd.args(["--batch", "--no-tty", "--status-fd", "1", "--no-auto-key-retrieve", "--verify"]);
-        cmd.arg(&sig).arg(&payload);
+        cmd.arg(sig).arg(payload);
         match self.run(cmd, None, "gpg") {
             Some((_, out, _)) => gpg_status(&out),
             None => SigStatus::Unchecked("gpg unavailable".into()),
         }
     }
 
-    fn ssh(&mut self, s: &SignedCommit, email: &str) -> SigStatus {
-        let Some((sig, payload)) = self.files(s) else { return SigStatus::Unchecked("temp files".into()) };
+    fn ssh(&self, s: &SignedCommit, email: &str) -> SigStatus {
+        let Some(files) = self.files(s) else { return SigStatus::Unchecked("temp files".into()) };
+        let (sig, payload) = (&files.0, &files.1);
         let intact = {
             let mut cmd = Command::new("ssh-keygen");
-            cmd.args(["-Y", "check-novalidate", "-n", "git", "-s"]).arg(&sig);
-            match self.run(cmd, Some(&payload), "ssh-keygen") {
+            cmd.args(["-Y", "check-novalidate", "-n", "git", "-s"]).arg(sig);
+            match self.run(cmd, Some(payload), "ssh-keygen") {
                 Some((true, _, _)) => true,
                 Some((false, out, err)) => {
                     let msg = format!("{out}{err}");
@@ -154,8 +171,8 @@ impl Verifier {
             return if intact { SigStatus::Intact } else { SigStatus::Unchecked("ssh".into()) };
         };
         let mut cmd = Command::new("ssh-keygen");
-        cmd.args(["-Y", "verify", "-n", "git", "-f"]).arg(&allowed).arg("-I").arg(email).arg("-s").arg(&sig);
-        match self.run(cmd, Some(&payload), "ssh-keygen") {
+        cmd.args(["-Y", "verify", "-n", "git", "-f"]).arg(&allowed).arg("-I").arg(email).arg("-s").arg(sig);
+        match self.run(cmd, Some(payload), "ssh-keygen") {
             Some((true, _, _)) => SigStatus::Good { signer: email.to_string() },
             Some((false, _, _)) => SigStatus::NoKey,
             None => SigStatus::Intact,
@@ -164,7 +181,7 @@ impl Verifier {
 
     /// Run `cmd` in an empty directory with a minimal environment. Returns
     /// (success, stdout, stderr), or `None` if it could not run.
-    fn run(&mut self, mut cmd: Command, stdin: Option<&Path>, tool: &str) -> Option<(bool, String, String)> {
+    fn run(&self, mut cmd: Command, stdin: Option<&Path>, tool: &str) -> Option<(bool, String, String)> {
         let keep: Vec<_> = ["PATH", "HOME", "GNUPGHOME", "LANG", "LC_ALL"]
             .iter()
             .filter_map(|k| std::env::var_os(k).map(|v| (*k, v)))
@@ -188,7 +205,7 @@ impl Verifier {
             Ok(c) => c,
             Err(e) => {
                 let why = if e.kind() == std::io::ErrorKind::NotFound { "is not installed" } else { "could not run" };
-                self.notes.insert(format!("`{tool}` {why}; some commit signatures were not verified"));
+                self.note(format!("`{tool}` {why}; some commit signatures were not verified"));
                 return None;
             }
         };
@@ -199,7 +216,7 @@ impl Verifier {
                 Ok(None) if start.elapsed() > TIMEOUT => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    self.notes.insert(format!("`{tool}` timed out; some commit signatures were not verified"));
+                    self.note(format!("`{tool}` timed out; some commit signatures were not verified"));
                     return None;
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(5)),
@@ -215,6 +232,16 @@ impl Verifier {
             let _ = e.read_to_string(&mut err);
         }
         Some((status.success(), out, err))
+    }
+}
+
+/// Signature and payload files, removed when dropped.
+struct TempPair(PathBuf, PathBuf);
+
+impl Drop for TempPair {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_file(&self.1);
     }
 }
 
@@ -301,7 +328,7 @@ mod tests {
     #[test]
     fn bundled_web_flow_keyring_verifies_and_rejects() {
         // A tampered payload under a real-looking signature must never be Good.
-        let mut v = Verifier::new(None).unwrap();
+        let v = Verifier::new(None).unwrap();
         let s = SignedCommit {
             signature: b"-----BEGIN PGP SIGNATURE-----\n\nwsBcBAABCAAQBQJ\n-----END PGP SIGNATURE-----\n".to_vec(),
             payload: b"tree x\n\nmsg\n".to_vec(),
@@ -349,13 +376,13 @@ mod tests {
 
         let repo = GitRepo::discover(&r).unwrap();
         let sig = |h: &str| repo.commit_signature(ObjectId::from_hex(h.as_bytes()).unwrap()).unwrap().unwrap();
-        let mut v = Verifier::new(None).unwrap();
+        let v = Verifier::new(None).unwrap();
         assert_eq!(v.verify(&sig(&head), "s@example.com").status, SigStatus::Intact);
         assert!(matches!(v.verify(&sig(&forged), "s@example.com").status, SigStatus::Bad(_)));
 
         let pubkey = std::fs::read_to_string(d.join("key.pub")).unwrap();
         std::fs::write(d.join("allowed"), format!("s@example.com {pubkey}")).unwrap();
-        let mut v = Verifier::new(Some(d.join("allowed"))).unwrap();
+        let v = Verifier::new(Some(d.join("allowed"))).unwrap();
         assert!(matches!(v.verify(&sig(&head), "s@example.com").status, SigStatus::Good { .. }));
         assert_eq!(v.verify(&sig(&head), "other@example.com").status, SigStatus::NoKey);
         // Claiming GitHub as committer with an SSH signature is never good.

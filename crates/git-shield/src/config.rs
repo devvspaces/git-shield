@@ -14,6 +14,35 @@ use std::path::PathBuf;
 pub struct Config {
     #[serde(default)]
     pub allow: Vec<Allow>,
+    #[serde(default)]
+    pub signing: Vec<Signing>,
+}
+
+/// Signature policy for repositories matching `repo` (ADR 0007).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Signing {
+    /// Repository glob, e.g. `github.com/acme/*`.
+    pub repo: String,
+    /// SSH allowed-signers file (`~/` is expanded) used to tie SSH signatures to committers.
+    pub allowed_signers: Option<String>,
+    /// Unsigned or unverifiable incoming commits are findings.
+    #[serde(default)]
+    pub require: bool,
+}
+
+/// Effective signing policy for one repository.
+#[derive(Debug, Default)]
+pub struct SigningPolicy {
+    pub allowed_signers: Option<PathBuf>,
+    pub require: bool,
+}
+
+pub fn expand_home(p: &str) -> PathBuf {
+    match (p.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(h)) => PathBuf::from(h).join(rest),
+        _ => PathBuf::from(p),
+    }
 }
 
 /// One allowlist entry. Every given field must match.
@@ -54,6 +83,16 @@ pub fn load() -> Result<Config> {
             bail!("{}: allow entry #{} (`{}`) is too broad; add a path, blob or repo", p.display(), i + 1, a.rule);
         }
     }
+    for (i, s) in cfg.signing.iter().enumerate() {
+        if s.repo.trim().is_empty() {
+            bail!("{}: signing entry #{} needs a repo glob", p.display(), i + 1);
+        }
+        if let Some(f) = s.allowed_signers.as_deref().map(expand_home)
+            && !f.is_file()
+        {
+            bail!("{}: signing entry #{}: allowed_signers {} not found", p.display(), i + 1, f.display());
+        }
+    }
     Ok(cfg)
 }
 
@@ -75,6 +114,19 @@ impl Allow {
 }
 
 impl Config {
+    /// Every matching `[[signing]]` entry applies: `require` if any requires,
+    /// the first `allowed_signers` given.
+    pub fn signing_for(&self, repo_ids: &[String]) -> SigningPolicy {
+        let mut p = SigningPolicy::default();
+        for s in self.signing.iter().filter(|s| repo_ids.iter().any(|id| glob_match(&s.repo, id))) {
+            p.require |= s.require;
+            if p.allowed_signers.is_none() {
+                p.allowed_signers = s.allowed_signers.as_deref().map(expand_home);
+            }
+        }
+        p
+    }
+
     /// Ids of findings the allowlist accepts, plus a warning per Critical
     /// finding that an unpinned entry would otherwise have matched.
     pub fn accepted<'a>(&self, findings: &'a [Finding], repo_ids: &[String]) -> (Vec<&'a str>, Vec<String>) {
