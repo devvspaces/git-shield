@@ -197,3 +197,9 @@ Each phase ends with: green `cargo test` + `cargo clippy -D warnings`, the PROGR
   - `audit` scans files on disk (not only `.git/config`). Symlinks are never followed, and dependency and build directories are skipped.
   - `clone` populates the working tree with `reset --hard <scanned sha>` after a no-checkout clone.
   - Full GPG/SSH signature verification is postponed to the Phase 4 remainder, next to GitHub's `verification` status.
+- **2026-11-20 (session 6):** Phase 4 completed ([ADR 0007](adr/0007-commit-signatures-and-pr-merge-commits.md)). Changes to the plan:
+  - Full GPG/SSH verification moved here from Phase 5. GitHub's own merges are verified offline against its bundled web-flow keys.
+  - "Pusher vs author" became evidence attached to T10/T11 findings ("arrived in a force-push by @X"), not a rule of its own. Direct pushes of other people's commits are normal in rebase workflows.
+  - A per-repo signing policy (`[[signing]] require / allowed_signers`) was added to the user config.
+  - A 404 from GitHub is treated as "does not exist" only after the repository itself answered in the same run.
+

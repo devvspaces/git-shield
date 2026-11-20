@@ -7,11 +7,11 @@
 
 | | |
 |---|---|
-| **Phase** | 5 done except signature verification (moved to Phase 4 remainder) → next: Phase 4 remainder (commit verification, PR merge-SHA, GPG/SSH) or Phase 6 (SARIF/CI) |
-| **Last completed** | Session 5: `audit`, `clone`, `checkout`, `doctor`, `install`/`uninstall` (shell function, ADR 0006). 106 tests green |
-| **Next task** | Ask the user: Phase 4 remainder (GitHub `verification` + PR merge-SHA match + local GPG/SSH verify) vs Phase 6 (SARIF, `--ci`, GitHub Action) |
+| **Phase** | 0–5 done → next: Phase 6 (yara-x rules, SARIF, `--ci`, GitHub Action, benchmarks) |
+| **Last completed** | Session 6: Phase 4 remainder: local GPG/SSH verification, GitHub commit verification, PR merge-SHA match, push attribution, `[[signing]]` config (ADR 0007). 125 tests green |
+| **Next task** | Phase 6, when the user asks |
 | **Blockers** | None |
-| **Perf** | Warm, release build, matador-legacy: `scan af20233d8..d9351023d` (20 commits, 58 file versions) **~30 ms**; `scan HEAD..origin/dev` with provenance **~20–90 ms** (target < 300 ms); GitHub lookup adds **~1–2 s** of network |
+| **Perf** | Warm, release build, matador-legacy: `scan af20233d8..d9351023d` (20 commits, 58 file versions) **~30 ms**; `scan HEAD..origin/dev` with provenance **~20–90 ms** (target < 300 ms); GitHub lookup adds **~1–2 s** of network; local signature checks ~3 ms per signed commit (parallel) |
 
 ## Phase checklist
 
@@ -54,7 +54,8 @@
 
 ### Phase 4: GitHub provenance, optional (v0.3)
 - [x] Activity API force-push history + actors, offline degradation, fake-API tests (session 3, ADR 0004)
-- [ ] Commit `verification` status for incoming commits, pusher vs author, PR merge-SHA match (`Merge pull request #N` must equal PR N's merge commit), per-SHA cache
+- [x] Commit `verification` status (compare API), PR merge-SHA match (`t11.pr-merge-mismatch`), pusher attribution, per-repo cache of immutable facts (session 6, ADR 0007)
+- [x] Local GPG/SSH verification; bundled GitHub web-flow keys; `t11.signature-bad`, `t11.github-unverified`, `t11.signature-unverified`, `[[signing]] require` (`t11.unsigned-required`)
 
 ### Phase 5: clone / checkout / audit / install / doctor (v0.4)
 - [x] `audit [path] [--rev REV]`: files on disk + .git/config/hooks; no symlink following; deps/build dirs skipped
@@ -62,7 +63,7 @@
 - [x] `checkout <target>`: stricter preflight, HEAD→target tree scan, DWIM remote branches, post-switch HEAD check
 - [x] `doctor`: git / VS Code-family / Claude Code user settings, read-only
 - [x] `install` / `uninstall`: shell function for `git pull` (ADR 0006; the reference-transaction hook was tested and rejected)
-- [ ] Full GPG/SSH signature verification: moved to the Phase 4 remainder
+- [x] Full GPG/SSH signature verification: done in the Phase 4 remainder (session 6)
 
 ### Phase 6: yara-x rules, SARIF, GitHub Action, benchmarks (v0.5)
 ### Phase 7: cargo-dist releases, Homebrew, signed artifacts (v1.0)
@@ -74,7 +75,10 @@
 - ~~`t11.merge-not-by-github` noise on long ranges~~ Grouped per committer in session 3.
 - ~~No way to list/forget stored acceptances~~ `git shield trust` in session 3.
 - The GitHub activity log is read up to 3 pages (300 force-pushes). Very busy branches without a trust record could miss older events.
-- `scan --github` needs the range to end at a remote-tracking ref (it derives remote/branch from it).
+- `scan --github` on a range that does not end at a remote-tracking ref checks commits and PRs, but not the force-push log or pushers (no branch to ask about).
+- GitHub checks cover 300 commits per range (first page + newest pages) and 100 PR numbers per scan. Larger forensic ranges print a note.
+- Signature checks run on `scan`/`check`/`pull` ranges only. `clone`/`checkout` scan trees, not commit lists, so they do not verify signatures yet.
+- The matador-legacy real-data run found five more forged "Merge pull request" commits still in `dev`. Details went to the user only; nothing was changed in that repo.
 - Content rules see added lines and changed entries per file version. A payload split across two files or two commits only correlates via `t13.payload-wired` (refs) or `t10.tampered-payload`.
 - `t9.workflow.remote-exec` (Medium) fires on common `curl … | sh` installer steps in CI. It was 10 hits across the FP repos. Consider an allowlist of well-known installer hosts.
 - The signature list is small on purpose. Grow it only with sourced entries.
@@ -197,3 +201,28 @@
   - `audit` on matador-legacy gives 0 High after grading. It reports 2 Medium `t4.claude.permissions` for the local `.claude/settings.local.json` (`Bash(python:*)`).
   - `doctor` on this machine: WARN `safe.bareRepository`, info `transfer.fsckObjects`; nothing changed.
 - Tests: 106.
+
+### 2026-11-20: Session 6 (Phase 4 remainder)
+- `shield-github`:
+  - `compare` (per-commit `verification`; first page + newest pages), `pull` (`Merged{sha}` / `Open` / `ClosedUnmerged` / `NotFound`), `activity` (all push kinds), `repo_visible`;
+  - `cache` (final verifications, merged PRs, compared ranges).
+- `shield-git::signing`:
+  - signature + payload via gix;
+  - `gpgv` against bundled web-flow keys (empty GNUPGHOME), `gpg` against the user's keyring, `ssh-keygen -Y verify` / `check-novalidate`;
+  - scrubbed env, temp cwd, timeout, parallel-safe;
+  - `GitRepo::commit_ids` for push attribution.
+- `shield-core`: `ScanContext.attest` (`Attestations`: local checks, GitHub verification, PR states, pushers, require flag).
+- `shield-rules::signing`: `t11.pr-merge-mismatch`, `t11.signature-bad`, `t11.github-unverified`, `t11.signature-unverified`, `t11.unsigned-required`, `PushAttribution`. `github_merges` skips commits GitHub already answered for.
+- CLI:
+  - `--no-verify-signatures`;
+  - `[[signing]] repo / allowed_signers / require` in the user config;
+  - `scan --github` works on any range.
+- **Safety fix found by tests:** GitHub answers 404 for repositories the token cannot see. PR 404s only count once the repository answered in the same run (else a note); otherwise every merge would have been a false Critical.
+- **Real data (read-only, matador-legacy, GitHub reads only):**
+  - `scan --github d9d45eff3..0a32698f4` (no `--previous-tip`) now BLOCKS with `t11.pr-merge-mismatch` Critical: PR #2921's real merge is `d9d45eff3`.
+  - `scan --github HEAD~300..HEAD` gives 6 Critical `t11.pr-merge-mismatch`, each hand-checked against `gh api …/pulls/N`. Five are new forgeries: all unsigned, with the attacker's `-0800`/`-0700` timezone and content differing from GitHub's merge.
+  - It also gives 1 Low: a web-flow-signed merge whose PR is recorded as closed and unmerged. GitHub made it, so it is not a forgery.
+  - Time: cold 60 s → 15 s (parallel PR lookups, newest compare pages), warm 3.4 s.
+  - Unchanged: `scan HEAD..origin/dev` CLEAN; incident replay BLOCKS; `af20233d8..d9351023d` warns; `audit` 2 Medium.
+- Tests: 125.
+

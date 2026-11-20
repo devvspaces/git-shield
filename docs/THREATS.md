@@ -16,7 +16,7 @@ Status: ✅ detector shipped · 🚧 partial · ⏳ planned (phase in brackets)
 | T8 | `.gitattributes` custom filter/diff/merge drivers; `.gitmodules` URL swap, `ext::`, `update=!cmd`, path escape | checkout / diff / `submodule update` | ✅ |
 | T9 | `.devcontainer` lifecycle commands; `.github/workflows` with `pull_request_target`, secret exfiltration | Container open / CI | ✅ (`ci.rs`; self-hosted runner backdoor, script injection) |
 | T10 | History rewrite / force-push over a tip you had already seen | pull after an account compromise | ✅ offline (pre-fetch tip, reflog, trust store) + GitHub force-push log (ADR 0004) |
-| T11 | Impersonated commits: copied merge with a new SHA, dropped signature, "Merge pull request" not committed by GitHub, odd timezone, backdating | same | ✅ offline (+ GitHub API [4]) |
+| T11 | Impersonated commits: copied merge with a new SHA, dropped signature, "Merge pull request" not committed by GitHub or not PR N's real merge, forged or invalid signatures, odd timezone, backdating | same | ✅ offline + local GPG/SSH verification + GitHub API (ADR 0004, 0007) |
 | T12 | Whitespace / CRLF churn that buries a small real change in a huge diff | code review | ✅ |
 | T13 | Obfuscated code (eval+base64/hex, `exec(compile(`, zlib+b64 chains, long single lines, high entropy) | running the app | ✅ (`obfuscation.rs`; off-screen code; `t13.payload-wired` correlation) |
 
@@ -42,6 +42,7 @@ Status: ✅ detector shipped · 🚧 partial · ⏳ planned (phase in brackets)
 
 ### T10, T11: forced history and impersonation (Shai-Hulud family)
 - Compromised accounts force-push rewritten tips that keep the author name, email, and date but drop signatures. In the matador case the committer timezone was -0800 and a "Merge pull request #2921" commit was not committed by GitHub.
+- The decisive check is GitHub's own record: `pulls/N` → `merge_commit_sha` is the only commit the merge button produced, and GitHub signs it with its web-flow key. On matador-legacy this exposed five more forged merges still in `dev` (session 6).
 - Sources: [StepSecurity: gpt-pilot](https://www.stepsecurity.io/blog/pythagora-io-gpt-pilot-compromised-on-github-shai-hulud-credential-stealer-blocked-by-python-linter), [Trigger.dev postmortem](https://trigger.dev/blog/shai-hulud-postmortem).
 
 ### T12: noise masking

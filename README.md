@@ -42,14 +42,15 @@ git-shield: pull blocked; nothing was merged.
 | Submodules / attributes | URL swaps, `ext::`, `update=!cmd`, custom drivers |
 | Noise masking | CRLF/whitespace churn hiding small real changes |
 | History in transit | payloads added then removed in intermediate commits |
-| Force-push / impersonation | a branch that dropped commits you had (or that GitHub logged as force-pushed by someone else), unsigned copies of signed merges, "Merge pull request" commits not made by GitHub, odd timezones and dates |
+| Force-push / impersonation | a branch that dropped commits you had (or that GitHub logged as force-pushed by someone else), unsigned copies of signed merges, "Merge pull request" commits that are not the PR's real merge on GitHub, odd timezones and dates |
+| Signatures | GPG/SSH signatures that do not verify, "GitHub" commits not signed by GitHub's key (checked offline), optional "require signed commits" per repo |
 | AI-agent configs | Claude Code / Gemini / Codex hooks and helper commands, MCP servers, `enableAllProjectMcpServers`, API-endpoint redirects, invisible text or covert commands in AGENTS.md / CLAUDE.md / Cursor rules |
 | Lifecycle scripts | npm install scripts, `setup.py` / `conftest.py` side effects, `.pth` files, build backends, Makefiles and repo git hooks that fetch-and-run |
 | Shell env | direnv `.envrc` commands, mise hooks |
 | Devcontainers / CI | `initializeCommand` (runs on the host), `toJSON(secrets)`, `pull_request_target` checkouts, self-hosted runner backdoors, script injection |
 | Obfuscation | code hidden off-screen after long whitespace, decode-then-execute, huge lines, high-entropy blobs; and which task/hook/script runs them |
 | Known indicators | a small, sourced list of worm artefacts (`crates/shield-rules/data/signatures.toml`) |
-| *Coming* | GitHub commit verification and full GPG/SSH signature checks, SARIF / CI mode, releases |
+| *Coming* | yara-x rules, SARIF / CI mode, releases |
 
 Full list with sources: [docs/THREATS.md](docs/THREATS.md).
 
@@ -89,7 +90,20 @@ repo = "github.com/acme/*"
 reason = "our docs MCP server, reviewed 2026-11"
 # Critical findings are only allowed with `blob = "<content id>"` pinned.
 ```
-For GitHub remotes, `check` and `pull` also read the branch's force-push log, so a rewrite is caught even if this machine never saw the old tip. They use `GITHUB_TOKEN` or your `gh` login. The token is only sent to api.github.com. Use `--no-github` to skip this, or `scan --github` to add it to a local scan. Without a token it notes the skip and carries on.
+For GitHub remotes, `check` and `pull` also ask GitHub:
+- the branch's force-push and push log, so a rewrite is caught even if this machine never saw the old tip, and findings name who pushed;
+- each incoming commit's signature verification;
+- whether every "Merge pull request #N" commit is PR N's real merge commit.
+
+They use `GITHUB_TOKEN` or your `gh` login. The token is only sent to api.github.com. Answers that cannot change are cached in `~/.cache/git-shield`. Use `--no-github` to skip this, or `scan --github` to add it to a local scan. Without a token it notes the skip and carries on.
+
+Signed incoming commits are also verified locally with `gpgv` / `gpg` / `ssh-keygen` (`--no-verify-signatures` to skip). Commits claiming GitHub as committer are checked against GitHub's published keys, bundled with git-shield ([ADR 0007](docs/adr/0007-commit-signatures-and-pr-merge-commits.md)). To require signatures for a repository:
+```toml
+[[signing]]
+repo = "github.com/acme/*"
+require = true                                      # unsigned incoming commits block
+allowed_signers = "~/.config/git-shield/acme_signers"   # ties SSH signatures to committers
+```
 Exit codes: `0` clean · `1` warnings · `2` blocked · `3` error.
 
 ## How it stays safe
