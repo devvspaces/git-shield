@@ -1,6 +1,6 @@
 [package]
 name = "shield-github"
-description = "Optional GitHub lookups for git-shield (force-push history)"
+description = "Optional GitHub lookups for git-shield (push history, commit verification, PR merges)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

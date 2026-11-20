@@ -1,4 +1,6 @@
-//! Optional GitHub lookups: the force-push history of a branch (activity API).
+//! Optional GitHub lookups: a branch's push history (activity API), GitHub's
+//! signature verification of commits (compare API) and pull-request merge
+//! commits.
 //!
 //! Everything here degrades to "no data": callers get an `Err(String)` note to
 //! show the user, never a panic, and the scan carries on offline.
@@ -7,7 +9,9 @@
 //! `GIT_SHIELD_GITHUB_API` for GitHub Enterprise and tests), never to a host
 //! taken from the repository.
 
-use serde::Deserialize;
+pub mod cache;
+
+use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -18,14 +22,40 @@ pub const MAX_PAGES: usize = 3;
 const TIMEOUT: Duration = Duration::from_secs(10);
 const GH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// One force-push to a branch, as recorded by GitHub.
+/// One push to a branch, as recorded by GitHub's activity log.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ForcePush {
+pub struct Push {
     pub before: String,
     pub after: String,
     pub actor: String,
     /// Unix seconds.
     pub at: i64,
+    /// `push`, `force_push`, `pr_merge`, `merge_queue_merge`, `branch_creation`, ...
+    pub kind: String,
+}
+
+/// Kept for callers that only care about force-pushes.
+pub type ForcePush = Push;
+
+/// GitHub's view of one commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteCommit {
+    pub sha: String,
+    pub verified: bool,
+    /// GitHub's verification reason: `valid`, `unsigned`, `invalid`, `unknown_key`, `bad_email`, ...
+    pub reason: String,
+    pub author_login: Option<String>,
+    pub committer_login: Option<String>,
+}
+
+/// State of a pull request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum PullState {
+    Merged { merge_commit_sha: String },
+    Open,
+    ClosedUnmerged,
+    NotFound,
 }
 
 pub struct Client {
@@ -40,6 +70,46 @@ struct Activity {
     after: String,
     timestamp: String,
     actor: Option<Actor>,
+    #[serde(default)]
+    activity_type: String,
+}
+
+#[derive(Deserialize)]
+struct Compare {
+    #[serde(default)]
+    commits: Vec<CompareCommit>,
+    #[serde(default)]
+    total_commits: usize,
+}
+
+#[derive(Deserialize)]
+struct CompareCommit {
+    sha: String,
+    commit: CompareInner,
+    author: Option<Actor>,
+    committer: Option<Actor>,
+}
+
+#[derive(Deserialize)]
+struct CompareInner {
+    verification: Option<Verification>,
+}
+
+#[derive(Deserialize)]
+struct Verification {
+    verified: bool,
+    #[serde(default)]
+    reason: String,
+}
+
+#[derive(Deserialize)]
+struct Pull {
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    merged: bool,
+    merged_at: Option<String>,
+    merge_commit_sha: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -74,6 +144,14 @@ impl Client {
     }
 
     fn get(&self, url: &str) -> Result<(String, Option<String>), String> {
+        match self.get_status(url)? {
+            (200, body, link) => Ok((body, link)),
+            (status, body, _) => Err(http_error(status, &body)),
+        }
+    }
+
+    /// Like [`Self::get`], but returns any HTTP status to the caller.
+    fn get_status(&self, url: &str) -> Result<(u16, String, Option<String>), String> {
         if !url.strip_prefix(self.base.as_str()).is_some_and(|rest| rest.starts_with('/')) {
             return Err(format!("refusing to send the token to {url}"));
         }
@@ -89,14 +167,7 @@ impl Client {
         let status = resp.status().as_u16();
         let link = resp.headers().get("link").and_then(|v| v.to_str().ok()).map(str::to_string);
         let body = resp.body_mut().read_to_string().map_err(|e| format!("GitHub response unreadable: {e}"))?;
-        if status != 200 {
-            let msg = serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|v| v["message"].as_str().map(str::to_string))
-                .unwrap_or_default();
-            return Err(format!("GitHub returned HTTP {status} {msg}").trim_end().to_string());
-        }
-        Ok((body, link))
+        Ok((status, body, link))
     }
 
     /// Login of the token's owner.
@@ -108,8 +179,23 @@ impl Client {
 
     /// Force-pushes to `branch`, newest first (at most [`MAX_PAGES`] pages).
     pub fn force_pushes(&self, owner: &str, name: &str, branch: &str) -> Result<Vec<ForcePush>, String> {
+        let v = self.activity(owner, name, branch, Some("force_push"), None)?;
+        Ok(v.into_iter().filter(|p| p.kind.is_empty() || p.kind == "force_push").collect())
+    }
+
+    /// Every push-like event on `branch`, newest first, stopping at events
+    /// older than `since` (unix seconds) or after [`MAX_PAGES`] pages.
+    pub fn activity(
+        &self,
+        owner: &str,
+        name: &str,
+        branch: &str,
+        kind: Option<&str>,
+        since: Option<i64>,
+    ) -> Result<Vec<Push>, String> {
+        let filter = kind.map(|k| format!("&activity_type={}", encode(k))).unwrap_or_default();
         let mut url = Some(format!(
-            "{}/repos/{owner}/{name}/activity?ref=refs%2Fheads%2F{}&activity_type=force_push&per_page=100",
+            "{}/repos/{owner}/{name}/activity?ref=refs%2Fheads%2F{}{filter}&per_page=100",
             self.base,
             encode(branch)
         ));
@@ -117,27 +203,115 @@ impl Client {
         for _ in 0..MAX_PAGES {
             let Some(u) = url.take() else { break };
             let (body, link) = self.get(&u)?;
-            out.extend(parse_activity(&body)?);
+            let page = parse_activity(&body)?;
+            let done = since.is_some_and(|s| page.iter().any(|p| p.at <= s));
+            out.extend(page);
+            if done {
+                break;
+            }
             url = link.as_deref().and_then(next_link);
         }
         Ok(out)
     }
+
+    /// Commits in `base...head` as GitHub sees them (oldest first), and the
+    /// total GitHub reports (more than returned when the page cap was hit).
+    pub fn compare(
+        &self,
+        owner: &str,
+        name: &str,
+        base: &str,
+        head: &str,
+    ) -> Result<(Vec<RemoteCommit>, usize), String> {
+        let mut out = Vec::new();
+        let mut total = 0;
+        for page in 1..=MAX_PAGES {
+            let url = format!(
+                "{}/repos/{owner}/{name}/compare/{}...{}?per_page=100&page={page}",
+                self.base,
+                encode(base),
+                encode(head)
+            );
+            let (body, link) = self.get(&url)?;
+            let (commits, t) = parse_compare(&body)?;
+            total = total.max(t);
+            let n = commits.len();
+            out.extend(commits);
+            if n < 100 || out.len() >= total || link.as_deref().and_then(next_link).is_none() {
+                break;
+            }
+        }
+        let total = total.max(out.len());
+        Ok((out, total))
+    }
+
+    /// State of pull request `number`.
+    pub fn pull(&self, owner: &str, name: &str, number: u64) -> Result<PullState, String> {
+        let url = format!("{}/repos/{owner}/{name}/pulls/{number}", self.base);
+        match self.get_status(&url)? {
+            (200, body, _) => parse_pull(&body),
+            (404, _, _) => Ok(PullState::NotFound),
+            (status, body, _) => Err(http_error(status, &body)),
+        }
+    }
 }
 
-pub fn parse_activity(body: &str) -> Result<Vec<ForcePush>, String> {
+fn http_error(status: u16, body: &str) -> String {
+    let msg = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v["message"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    format!("GitHub returned HTTP {status} {msg}").trim_end().to_string()
+}
+
+pub fn parse_activity(body: &str) -> Result<Vec<Push>, String> {
     let items: Vec<Activity> =
         serde_json::from_str(body).map_err(|e| format!("unexpected GitHub activity response: {e}"))?;
     Ok(items
         .into_iter()
         .filter_map(|a| {
-            Some(ForcePush {
+            Some(Push {
                 at: parse_time(&a.timestamp)?,
                 actor: a.actor.map(|x| x.login).unwrap_or_default(),
                 before: a.before,
                 after: a.after,
+                kind: a.activity_type,
             })
         })
         .collect())
+}
+
+pub fn parse_compare(body: &str) -> Result<(Vec<RemoteCommit>, usize), String> {
+    let c: Compare = serde_json::from_str(body).map_err(|e| format!("unexpected GitHub compare response: {e}"))?;
+    let commits = c
+        .commits
+        .into_iter()
+        .map(|x| {
+            let (verified, reason) = x.commit.verification.map_or((false, String::new()), |v| (v.verified, v.reason));
+            RemoteCommit {
+                sha: x.sha,
+                verified,
+                reason,
+                author_login: x.author.map(|a| a.login),
+                committer_login: x.committer.map(|a| a.login),
+            }
+        })
+        .collect();
+    Ok((commits, c.total_commits))
+}
+
+pub fn parse_pull(body: &str) -> Result<PullState, String> {
+    let p: Pull = serde_json::from_str(body).map_err(|e| format!("unexpected GitHub pull response: {e}"))?;
+    Ok(if p.merged || p.merged_at.is_some() {
+        match p.merge_commit_sha {
+            Some(sha) => PullState::Merged { merge_commit_sha: sha },
+            None => return Err("merged pull request without a merge_commit_sha".into()),
+        }
+    } else if p.state == "open" {
+        PullState::Open
+    } else {
+        PullState::ClosedUnmerged
+    })
 }
 
 /// The `rel="next"` URL of a `Link` header.
@@ -265,7 +439,13 @@ mod tests {
         let v = parse_activity(body).unwrap();
         assert_eq!(
             v,
-            [ForcePush { before: "aa".into(), after: "bb".into(), actor: "mallory".into(), at: 1_794_310_490 }]
+            [Push {
+                before: "aa".into(),
+                after: "bb".into(),
+                actor: "mallory".into(),
+                at: 1_794_310_490,
+                kind: "force_push".into()
+            }]
         );
         assert_eq!(parse_time("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_time("2000-03-01T00:00:00Z"), Some(951_868_800));
@@ -273,6 +453,26 @@ mod tests {
         assert_eq!(next_link(link).as_deref(), Some("https://api.github.com/x?after=Y"));
         assert_eq!(next_link(r#"<https://a>; rel="prev""#), None);
         assert!(parse_activity("{\"message\":\"Not Found\"}").is_err());
+    }
+
+    #[test]
+    fn compare_and_pulls() {
+        let body = r#"{"total_commits":2,"commits":[
+            {"sha":"aa","commit":{"verification":{"verified":true,"reason":"valid"}},"author":{"login":"al"},"committer":{"login":"web-flow"}},
+            {"sha":"bb","commit":{"verification":{"verified":false,"reason":"unsigned"}},"author":null,"committer":null}]}"#;
+        let (v, total) = parse_compare(body).unwrap();
+        assert_eq!(total, 2);
+        assert!(v[0].verified && v[0].committer_login.as_deref() == Some("web-flow"));
+        assert_eq!((v[1].verified, v[1].reason.as_str(), v[1].author_login.as_deref()), (false, "unsigned", None));
+        assert!(parse_compare("\"oops\"").is_err());
+
+        let merged = r#"{"state":"closed","merged":true,"merged_at":"2026-11-10T00:00:00Z","merge_commit_sha":"cc"}"#;
+        assert_eq!(parse_pull(merged).unwrap(), PullState::Merged { merge_commit_sha: "cc".into() });
+        assert_eq!(parse_pull(r#"{"state":"open","merged":false,"merge_commit_sha":"dd"}"#).unwrap(), PullState::Open);
+        assert_eq!(
+            parse_pull(r#"{"state":"closed","merged":false,"merged_at":null,"merge_commit_sha":"dd"}"#).unwrap(),
+            PullState::ClosedUnmerged
+        );
     }
 
     #[test]
