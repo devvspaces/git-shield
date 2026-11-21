@@ -97,6 +97,12 @@ For GitHub remotes, `check` and `pull` also ask GitHub:
 
 They use `GITHUB_TOKEN` or your `gh` login. The token is only sent to api.github.com. Answers that cannot change are cached in `~/.cache/git-shield`. Use `--no-github` to skip this, or `scan --github` to add it to a local scan. Without a token it notes the skip and carries on.
 
+`clone` and `checkout` run the signature and "Merge pull request" checks over the history they bring in, so a fresh clone with forged merges is blocked before any file is written. For forensic scans of long ranges:
+```sh
+git shield scan --github --deep A..B                 # read far more history, commits and PRs
+git shield scan --github --github-branch dev A..B    # whose push history explains a range that is not a ref
+```
+
 Signed incoming commits are also verified locally with `gpgv` / `gpg` / `ssh-keygen` (`--no-verify-signatures` to skip). Commits claiming GitHub as committer are checked against GitHub's published keys, bundled with git-shield ([ADR 0007](docs/adr/0007-commit-signatures-and-pr-merge-commits.md)). To require signatures for a repository:
 ```toml
 [[signing]]

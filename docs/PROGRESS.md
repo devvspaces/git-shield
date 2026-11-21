@@ -8,10 +8,10 @@
 | | |
 |---|---|
 | **Phase** | 0–5 done → next: Phase 6 (yara-x rules, SARIF, `--ci`, GitHub Action, benchmarks) |
-| **Last completed** | Session 6: Phase 4 remainder: local GPG/SSH verification, GitHub commit verification, PR merge-SHA match, push attribution, `[[signing]]` config (ADR 0007). 125 tests green |
+| **Last completed** | Session 7: lifted the Phase 4 limits: GraphQL batches, budgets and `scan --deep`, `--github-branch`, signature and PR checks on `clone`/`checkout` (ADR 0007 addendum). 132 tests green |
 | **Next task** | Phase 6, when the user asks |
 | **Blockers** | None |
-| **Perf** | Warm, release build, matador-legacy: `scan af20233d8..d9351023d` (20 commits, 58 file versions) **~30 ms**; `scan HEAD..origin/dev` with provenance **~20–90 ms** (target < 300 ms); GitHub lookup adds **~1–2 s** of network; local signature checks ~3 ms per signed commit (parallel) |
+| **Perf** | Warm, release build, matador-legacy: `scan af20233d8..d9351023d` (20 commits, 58 file versions) **~30 ms**; `scan HEAD..origin/dev` with provenance **~20–90 ms** (target < 300 ms); GitHub lookup adds **~1–2 s** of network; local signature checks ~3 ms per signed commit (parallel), web-flow verdicts cached; forensic `scan --github` of 1,110 commits **cold ~8 s, warm ~4 s** with full coverage |
 
 ## Phase checklist
 
@@ -74,10 +74,11 @@
 - ~~Reflog window without a trust record misses old rewrites~~ Closed for GitHub remotes in session 3 (ADR 0004). Non-GitHub remotes still rely on the reflog (30 days without a record) or `--previous-tip`.
 - ~~`t11.merge-not-by-github` noise on long ranges~~ Grouped per committer in session 3.
 - ~~No way to list/forget stored acceptances~~ `git shield trust` in session 3.
-- The GitHub activity log is read up to 3 pages (300 force-pushes). Very busy branches without a trust record could miss older events.
-- `scan --github` on a range that does not end at a remote-tracking ref checks commits and PRs, but not the force-push log or pushers (no branch to ask about).
-- GitHub checks cover 300 commits per range (first page + newest pages) and 100 PR numbers per scan. Larger forensic ranges print a note.
-- Signature checks run on `scan`/`check`/`pull` ranges only. `clone`/`checkout` scan trees, not commit lists, so they do not verify signatures yet.
+- ~~Activity log read to 3 pages~~ Session 7: 10 pages by default, 50 with `scan --deep`, stopping at the trust record or the range base; a note names the date reached when the budget runs out.
+- ~~`scan --github` off a remote-tracking ref skips the force-push log and pushers~~ Session 7: `--github-branch`, else a remote branch whose tip is the range end, else the default branch if it contains it. Feature branches are never guessed (their creation would claim every commit).
+- ~~GitHub checks cover 300 commits / 100 PRs~~ Session 7: GraphQL batches (100 per request). Defaults: 2000 signed commits, 1000 PRs; `--deep`: 5000 each. REST fallback (100) when GraphQL is unavailable.
+- ~~`clone`/`checkout` do not verify signatures~~ Session 7: they run the signature and PR rules over the history they bring in (clone: newest 50,000 commits; `require` is not applied to existing history).
+- Warm forensic scans are ~4 s on 1,110 commits: ~1.3 s is the offline diff walk, the rest is the activity log and the uncached open/unknown PRs. Fine for forensics; `check`/`pull` ranges are small.
 - The matador-legacy real-data run found five more forged "Merge pull request" commits still in `dev`. Details went to the user only; nothing was changed in that repo.
 - Content rules see added lines and changed entries per file version. A payload split across two files or two commits only correlates via `t13.payload-wired` (refs) or `t10.tampered-payload`.
 - `t9.workflow.remote-exec` (Medium) fires on common `curl … | sh` installer steps in CI. It was 10 hits across the FP repos. Consider an allowlist of well-known installer hosts.
@@ -226,3 +227,21 @@
   - Unchanged: `scan HEAD..origin/dev` CLEAN; incident replay BLOCKS; `af20233d8..d9351023d` warns; `audit` 2 Medium.
 - Tests: 125.
 
+### 2026-11-21: Session 7 (Phase 4 limits)
+- `shield-github`:
+  - GraphQL `pulls_batch` / `commits_batch` (100 aliases per request, 8 in flight); `repository: null` means "not visible" (no 404 guessing); REST `commit` fallback;
+  - `activity` takes a page budget and a stop callback, and reports `truncated`; `compare` takes a page budget and fetches pages in parallel;
+  - the cache also keeps local web-flow verdicts, keyed by the bundled keyring's hash.
+- CLI:
+  - `Budget` (activity pages, signed commits, PRs); `scan --deep`;
+  - `scan --github --github-branch BRANCH`; conservative branch auto-detection;
+  - `clone` / `checkout` run `shield_rules::signing_only()` over the commits they bring in and merge the findings (`Report::merge`); `--no-github` on both.
+- GitHub lookups (compare page 1, commit verifications, PR states) run concurrently. Compare now fetches only its first page: GitHub's verdict on unsigned commits adds nothing, and signed ones go through GraphQL. 12 compare pages took 9.5 s.
+- Push attribution: the newest push that brought a commit in wins; branch creations are skipped (they copy existing commits). Found on real data: a feature branch pushed today was credited with all of `dev`'s history.
+- **Real data (read-only, matador-legacy, GitHub reads only):**
+  - `scan --github HEAD~300..HEAD`: full coverage (no cap notes). It found 11 Critical `t11.pr-merge-mismatch`, up from 6; the old 100-PR cap hid five more. Each was hand-checked against `gh api …/pulls/N`: unsigned, committer not GitHub, tree differs from GitHub's merge. Details went to the user only.
+  - Time: cold 14 s → 8 s, warm ~4 s.
+  - `scan --github --github-branch dev d9d45eff3..0a32698f4` now also names the 11-10 force-push and reports the rewrite (`t10.ref-rewritten`, `t11.rewritten-copy`).
+  - `clone` of matador (from the local path into a temp dir) BLOCKS on 9 forged merges in `dev`'s history and writes no files.
+  - Unchanged: `scan HEAD..origin/dev` CLEAN; incident replay BLOCKS; `af20233d8..d9351023d` warns.
+- Tests: 132.

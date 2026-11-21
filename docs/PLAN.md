@@ -202,4 +202,11 @@ Each phase ends with: green `cargo test` + `cargo clippy -D warnings`, the PROGR
   - "Pusher vs author" became evidence attached to T10/T11 findings ("arrived in a force-push by @X"), not a rule of its own. Direct pushes of other people's commits are normal in rebase workflows.
   - A per-repo signing policy (`[[signing]] require / allowed_signers`) was added to the user config.
   - A 404 from GitHub is treated as "does not exist" only after the repository itself answered in the same run.
+- **2026-11-21:** Session 7 lifted the Phase 4 limits without new phases:
+  - GraphQL batching replaces most REST lookups;
+  - per-command budgets, plus `scan --deep`;
+  - `--github-branch` for ranges that don't end at a ref;
+  - signature and PR checks on `clone` and `checkout`.
+
+  See the ADR 0007 addendum.
 

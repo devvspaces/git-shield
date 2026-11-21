@@ -56,3 +56,45 @@ Pusher attribution adds a detail ("Arrived in a force-push by @X on …") to com
   - Local verification adds about 3 ms per signed commit, run in parallel: ~0.9 s for 300 signed commits, negligible for normal pulls.
   - A cold GitHub check of a 1,136-commit range takes ~15 s (100 PR lookups). Warm, it takes ~1 s.
 - Commits are the only thing verified. Tags, and pushes that bypass GitHub's activity log (GHES without it), are out of scope.
+
+## Addendum (2026-11-21): limits revisited
+
+Session 6 left caps of 300 commits and 100 PRs per scan, read the activity log to 3 pages, and skipped signatures on `clone`/`checkout`.
+
+**GraphQL:**
+- PR states and commit verifications are fetched through GraphQL, 100 per request (`{base}/graphql`, or `https://host/api/graphql` for a GHES base ending in `/api/v3`). The token guard allows only that URL.
+- `repository: null` means the token cannot see the repository, so nothing is concluded from it.
+- When GraphQL fails as a whole, git-shield falls back to REST, capped at 100 lookups.
+
+**What is looked up:**
+- Only signed commits are looked up on GitHub. For unsigned ones, GitHub's verdict is always `unsigned`, which is already known.
+- Compare fetches only its first page. It proves the repository answers and covers short pulls in one request.
+
+**Budgets:**
+
+| | `check` / `pull` / `scan` | `scan --deep`, `clone`, `checkout` |
+|---|---|---|
+| Activity pages | 10 | 50 |
+| Signed commits (local and GitHub) | 2000 | 5000 |
+| PR numbers | 1000 | 5000 |
+
+Every cap that is hit prints a note.
+
+**Activity log:**
+- Reading stops at the trust record, at a push that left the branch inside the range base, or once every incoming commit is explained.
+- Branch creations are not counted as introducing commits.
+
+**Cache:** local verdicts against the bundled web-flow keyring are cached, keyed by the keyring's hash. They cannot change for a given build. Other local verdicts are still not cached.
+
+**Clone and checkout:**
+- They run only the signing rules (`pr-merge-mismatch`, `signature-bad`, `github-unverified`, …) over the history they bring in. Clone covers the newest 50,000 commits.
+- The rules that compare a pull with your previous state do not apply.
+- `[[signing]] require` is not applied to a clone's existing history.
+
+**Ranges that don't end at a remote-tracking ref** use, in order:
+1. `--github-branch`;
+2. a remote branch whose tip is the range end;
+3. the remote's default branch, if it contains the range end.
+
+The upstream feature branch is never guessed. It contains the whole integration branch, so its creation would claim every commit.
+
