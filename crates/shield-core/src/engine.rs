@@ -41,6 +41,15 @@ impl Report {
         self.findings.iter().filter(move |f| f.severity.blocks() && !accepted.contains(&f.id.0))
     }
 
+    /// Add the findings of a second pass over the same target (e.g. the
+    /// signature checks of a clone), keeping the usual order.
+    pub fn merge(&mut self, other: Report) {
+        self.commits_scanned = self.commits_scanned.max(other.commits_scanned);
+        let mut all = std::mem::take(&mut self.findings);
+        all.extend(other.findings);
+        self.findings = finalize(all);
+    }
+
     /// 0 = clean, 1 = warnings only, 2 = blocked.
     pub fn exit_code(&self, accepted: &HashSet<String>) -> i32 {
         if self.blocking(accepted).next().is_some() {

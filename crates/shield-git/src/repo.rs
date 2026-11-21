@@ -211,6 +211,12 @@ impl GitRepo {
         Ok(out)
     }
 
+    /// Commits reachable from `to` but not from `from` (all history when
+    /// `from` is `None`), newest first, at most `limit`.
+    pub fn commits_since(&self, from: Option<ObjectId>, to: ObjectId, limit: usize) -> Result<Vec<CommitInfo>> {
+        self.commit_ids(to, from, limit)?.into_iter().map(|id| self.commit_info(id)).collect()
+    }
+
     pub fn commit_info(&self, id: ObjectId) -> Result<CommitInfo> {
         let commit = self.repo.find_commit(id).map_err(git_err)?;
         let decoded = commit.decode().map_err(git_err)?;

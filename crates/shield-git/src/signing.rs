@@ -23,6 +23,15 @@ use std::time::{Duration, Instant};
 
 /// GitHub's web-flow signing keys (from <https://github.com/web-flow.gpg>), dearmored.
 const WEB_FLOW_KEYRING: &[u8] = include_bytes!("../data/github-web-flow.gpg");
+
+/// Identifies the bundled web-flow keyring (FNV-1a over its bytes), so cached
+/// verdicts are dropped when a release ships different keys.
+pub fn keyring_id() -> String {
+    let h = WEB_FLOW_KEYRING
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x100_0000_01b3));
+    format!("{h:016x}-{}", WEB_FLOW_KEYRING.len())
+}
 const TIMEOUT: Duration = Duration::from_secs(5);
 /// Committer email GitHub uses for merges and web edits.
 pub const GITHUB_EMAIL: &str = "noreply@github.com";

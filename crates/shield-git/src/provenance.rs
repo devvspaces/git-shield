@@ -57,6 +57,31 @@ impl GitRepo {
         cfg.string(format!("remote.{remote}.url").as_str()).map(|s| s.to_string())
     }
 
+    /// Remote-tracking branches of `remote` (`refs/remotes/<remote>/*`, not
+    /// `HEAD`) as `(branch, tip)`.
+    pub fn remote_branches(&self, remote: &str) -> Vec<(String, ObjectId)> {
+        let prefix = format!("refs/remotes/{remote}/");
+        let Ok(platform) = self.repo().references() else { return Vec::new() };
+        let Ok(iter) = platform.prefixed(prefix.as_str()) else { return Vec::new() };
+        iter.filter_map(|r| {
+            let mut r = r.ok()?;
+            let name = r.name().as_bstr().to_string();
+            let branch = name.strip_prefix(&prefix)?.to_string();
+            if branch == "HEAD" {
+                return None;
+            }
+            Some((branch, r.peel_to_id().ok()?.detach()))
+        })
+        .collect()
+    }
+
+    /// The branch `refs/remotes/<remote>/HEAD` points at (the remote's default branch).
+    pub fn remote_default_branch(&self, remote: &str) -> Option<String> {
+        let r = self.repo().find_reference(format!("refs/remotes/{remote}/HEAD").as_str()).ok()?;
+        let target = r.target().try_name()?.as_bstr().to_string();
+        target.strip_prefix(&format!("refs/remotes/{remote}/")).map(str::to_string)
+    }
+
     /// Current target of a ref, peeled to a commit, if it exists.
     pub fn ref_tip(&self, name: &str) -> Option<ObjectId> {
         let mut r = self.repo().find_reference(name).ok()?;

@@ -12,13 +12,18 @@
 pub mod cache;
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_API: &str = "https://api.github.com";
-/// Pages of 100 events fetched at most.
-pub const MAX_PAGES: usize = 3;
+/// Default page budget (100 items per page) for the activity log and compare.
+pub const MAX_PAGES: usize = 10;
+/// Items per GraphQL request (aliases).
+pub const GRAPHQL_CHUNK: usize = 100;
+/// Requests in flight at once.
+const PARALLEL: usize = 8;
 const TIMEOUT: Duration = Duration::from_secs(10);
 const GH_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -36,6 +41,22 @@ pub struct Push {
 
 /// Kept for callers that only care about force-pushes.
 pub type ForcePush = Push;
+
+/// Events read from the activity log.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActivityLog {
+    /// Newest first.
+    pub events: Vec<Push>,
+    /// The page budget ran out while older events remained (and `since` was not reached).
+    pub truncated: bool,
+}
+
+impl ActivityLog {
+    /// Timestamp of the oldest event read.
+    pub fn oldest(&self) -> Option<i64> {
+        self.events.iter().map(|e| e.at).min()
+    }
+}
 
 /// GitHub's view of one commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,19 +176,129 @@ impl Client {
         if !url.strip_prefix(self.base.as_str()).is_some_and(|rest| rest.starts_with('/')) {
             return Err(format!("refusing to send the token to {url}"));
         }
-        let mut resp = self
+        let resp = self
             .agent
             .get(url)
             .header("Authorization", &format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", "git-shield")
-            .call()
-            .map_err(|e| format!("GitHub request failed: {e}"))?;
+            .call();
+        Self::read(resp)
+    }
+
+    fn read(
+        resp: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> Result<(u16, String, Option<String>), String> {
+        let mut resp = resp.map_err(|e| format!("GitHub request failed: {e}"))?;
         let status = resp.status().as_u16();
         let link = resp.headers().get("link").and_then(|v| v.to_str().ok()).map(str::to_string);
         let body = resp.body_mut().read_to_string().map_err(|e| format!("GitHub response unreadable: {e}"))?;
         Ok((status, body, link))
+    }
+
+    /// GraphQL endpoint for this API base: `{base}/graphql`, or
+    /// `https://host/api/graphql` for a GitHub Enterprise base `https://host/api/v3`.
+    pub fn graphql_url(&self) -> String {
+        match self.base.strip_suffix("/api/v3") {
+            Some(host) => format!("{host}/api/graphql"),
+            None => format!("{}/graphql", self.base),
+        }
+    }
+
+    /// POST a GraphQL query; the token only ever goes to [`Self::graphql_url`].
+    fn graphql(&self, query: &str, variables: serde_json::Value) -> Result<serde_json::Value, String> {
+        let url = self.graphql_url();
+        let body = serde_json::json!({ "query": query, "variables": variables }).to_string();
+        let resp = self
+            .agent
+            .post(&url)
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .header("Content-Type", "application/json")
+            .header("User-Agent", "git-shield")
+            .send(body.as_str());
+        match Self::read(resp)? {
+            (200, body, _) => {
+                let v: serde_json::Value =
+                    serde_json::from_str(&body).map_err(|e| format!("unexpected GitHub GraphQL response: {e}"))?;
+                if v.get("data").is_none_or(|d| d.is_null()) {
+                    let msg = v["errors"][0]["message"].as_str().unwrap_or("no data");
+                    return Err(format!("GitHub GraphQL error: {msg}"));
+                }
+                Ok(v)
+            }
+            (status, body, _) => Err(http_error(status, &body)),
+        }
+    }
+
+    /// States of many pull requests, [`GRAPHQL_CHUNK`] per request, in parallel.
+    /// `Ok(None)`: the repository is not visible to the token.
+    pub fn pulls_batch(
+        &self,
+        owner: &str,
+        name: &str,
+        numbers: &[u64],
+    ) -> Result<Option<HashMap<u64, PullState>>, String> {
+        let chunks: Vec<&[u64]> = numbers.chunks(GRAPHQL_CHUNK).collect();
+        let mut out = HashMap::new();
+        for r in parallel(&chunks, |chunk| {
+            let fields: String = chunk
+                .iter()
+                .map(|n| format!("p{n}: pullRequest(number: {n}) {{ state mergeCommit {{ oid }} }} "))
+                .collect();
+            let q = format!("query($o: String!, $n: String!) {{ repository(owner: $o, name: $n) {{ {fields}}} }}");
+            self.graphql(&q, serde_json::json!({ "o": owner, "n": name })).and_then(|v| parse_graphql_pulls(&v, chunk))
+        }) {
+            match r? {
+                Some(m) => out.extend(m),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(out))
+    }
+
+    /// GitHub's verification of many commits by id, [`GRAPHQL_CHUNK`] per request.
+    /// Ids GitHub does not know are left out. `Ok(None)`: the repository is not visible.
+    pub fn commits_batch(&self, owner: &str, name: &str, shas: &[String]) -> Result<Option<Vec<RemoteCommit>>, String> {
+        let shas: Vec<&String> =
+            shas.iter().filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())).collect();
+        let chunks: Vec<&[&String]> = shas.chunks(GRAPHQL_CHUNK).collect();
+        let mut out = Vec::new();
+        for r in parallel(&chunks, |chunk| {
+            let fields: String = chunk
+                .iter()
+                .enumerate()
+                .map(|(i, sha)| {
+                    format!(
+                        "c{i}: object(oid: \"{sha}\") {{ ... on Commit {{ oid signature {{ state }} \
+                         author {{ user {{ login }} }} committer {{ user {{ login }} }} }} }} "
+                    )
+                })
+                .collect();
+            let q = format!("query($o: String!, $n: String!) {{ repository(owner: $o, name: $n) {{ {fields}}} }}");
+            self.graphql(&q, serde_json::json!({ "o": owner, "n": name })).map(|v| parse_graphql_commits(&v))
+        }) {
+            match r? {
+                Some(v) => out.extend(v),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(out))
+    }
+
+    /// One commit by id over REST (fallback when GraphQL is unavailable).
+    /// `Ok(None)` when GitHub does not know it.
+    pub fn commit(&self, owner: &str, name: &str, sha: &str) -> Result<Option<RemoteCommit>, String> {
+        let url = format!("{}/repos/{owner}/{name}/commits/{}", self.base, encode(sha));
+        match self.get_status(&url)? {
+            (200, body, _) => {
+                let c: CompareCommit =
+                    serde_json::from_str(&body).map_err(|e| format!("unexpected GitHub commit response: {e}"))?;
+                Ok(Some(remote_commit(c)))
+            }
+            (404 | 422, _, _) => Ok(None),
+            (status, body, _) => Err(http_error(status, &body)),
+        }
     }
 
     /// Login of the token's owner.
@@ -177,14 +308,17 @@ impl Client {
         v["login"].as_str().map(str::to_string).ok_or_else(|| "GitHub /user has no login".into())
     }
 
-    /// Force-pushes to `branch`, newest first (at most [`MAX_PAGES`] pages).
-    pub fn force_pushes(&self, owner: &str, name: &str, branch: &str) -> Result<Vec<ForcePush>, String> {
-        let v = self.activity(owner, name, branch, Some("force_push"), None)?;
-        Ok(v.into_iter().filter(|p| p.kind.is_empty() || p.kind == "force_push").collect())
+    /// Force-pushes to `branch`, newest first, reading at most `max_pages` pages.
+    pub fn force_pushes(&self, owner: &str, name: &str, branch: &str, max_pages: usize) -> Result<ActivityLog, String> {
+        let mut log = self.activity(owner, name, branch, Some("force_push"), None, max_pages, |_| false)?;
+        log.events.retain(|p| p.kind.is_empty() || p.kind == "force_push");
+        Ok(log)
     }
 
-    /// Every push-like event on `branch`, newest first, stopping at events
-    /// older than `since` (unix seconds) or after [`MAX_PAGES`] pages.
+    /// Push-like events on `branch`, newest first. Paging stops at events
+    /// older than `since` (unix seconds), when `stop` returns true for the
+    /// events read so far, or after `max_pages` pages (then `truncated`).
+    #[allow(clippy::too_many_arguments)]
     pub fn activity(
         &self,
         owner: &str,
@@ -192,40 +326,45 @@ impl Client {
         branch: &str,
         kind: Option<&str>,
         since: Option<i64>,
-    ) -> Result<Vec<Push>, String> {
+        max_pages: usize,
+        mut stop: impl FnMut(&[Push]) -> bool,
+    ) -> Result<ActivityLog, String> {
         let filter = kind.map(|k| format!("&activity_type={}", encode(k))).unwrap_or_default();
         let mut url = Some(format!(
             "{}/repos/{owner}/{name}/activity?ref=refs%2Fheads%2F{}{filter}&per_page=100",
             self.base,
             encode(branch)
         ));
-        let mut out = Vec::new();
-        for _ in 0..MAX_PAGES {
+        let mut log = ActivityLog::default();
+        for _ in 0..max_pages.max(1) {
             let Some(u) = url.take() else { break };
             let (body, link) = self.get(&u)?;
             let page = parse_activity(&body)?;
             let done = since.is_some_and(|s| page.iter().any(|p| p.at <= s));
-            out.extend(page);
-            if done {
-                break;
+            log.events.extend(page);
+            if done || stop(&log.events) {
+                return Ok(log);
             }
             url = link.as_deref().and_then(next_link);
         }
-        Ok(out)
+        log.truncated = url.is_some();
+        Ok(log)
     }
 
     /// Commits in `base...head` as GitHub sees them, and the total GitHub
     /// reports. GitHub pages oldest first; when the range is longer than
-    /// [`MAX_PAGES`] pages, the first page and then the newest pages are
-    /// fetched, since the newest commits matter most.
+    /// `max_pages` pages, the first page and then the newest pages are
+    /// fetched, since the newest commits matter most. Pages after the first
+    /// are fetched in parallel.
     pub fn compare(
         &self,
         owner: &str,
         name: &str,
         base: &str,
         head: &str,
+        max_pages: usize,
     ) -> Result<(Vec<RemoteCommit>, usize), String> {
-        let page = |n: usize| -> Result<(Vec<RemoteCommit>, usize), String> {
+        let page = |n: &usize| -> Result<(Vec<RemoteCommit>, usize), String> {
             let url = format!(
                 "{}/repos/{owner}/{name}/compare/{}...{}?per_page=100&page={n}",
                 self.base,
@@ -234,16 +373,13 @@ impl Client {
             );
             parse_compare(&self.get(&url)?.0)
         };
-        let (mut out, total) = page(1)?;
+        let (mut out, total) = page(&1)?;
         let pages = total.div_ceil(100);
+        let max_pages = max_pages.max(1);
         let rest: Vec<usize> =
-            if pages <= MAX_PAGES { (2..=pages).collect() } else { (pages + 2 - MAX_PAGES..=pages).collect() };
-        for n in rest {
-            let (v, _) = page(n)?;
-            if v.is_empty() {
-                break;
-            }
-            out.extend(v);
+            if pages <= max_pages { (2..=pages).collect() } else { (pages + 2 - max_pages..=pages).collect() };
+        for r in parallel(&rest, page) {
+            out.extend(r?.0);
         }
         let total = total.max(out.len());
         Ok((out, total))
@@ -264,6 +400,67 @@ impl Client {
             (status, body, _) => Err(http_error(status, &body)),
         }
     }
+}
+
+/// Run `f` over `items`, at most [`PARALLEL`] at a time; results in order.
+fn parallel<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let mut out = Vec::with_capacity(items.len());
+    for group in items.chunks(PARALLEL) {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = group.iter().map(|it| scope.spawn(|| f(it))).collect();
+            out.extend(handles.into_iter().map(|h| h.join().expect("GitHub request thread panicked")));
+        });
+    }
+    out
+}
+
+/// PR states from a `pulls_batch` response. `None`: no such repository (or not visible).
+pub fn parse_graphql_pulls(v: &serde_json::Value, numbers: &[u64]) -> Result<Option<HashMap<u64, PullState>>, String> {
+    let repo = &v["data"]["repository"];
+    if repo.is_null() {
+        return Ok(None);
+    }
+    let mut out = HashMap::new();
+    for &n in numbers {
+        let pr = &repo[format!("p{n}")];
+        let st = if pr.is_null() {
+            PullState::NotFound
+        } else {
+            match pr["state"].as_str() {
+                Some("MERGED") => match pr["mergeCommit"]["oid"].as_str() {
+                    Some(oid) => PullState::Merged { merge_commit_sha: oid.to_string() },
+                    None => continue,
+                },
+                Some("OPEN") => PullState::Open,
+                Some("CLOSED") => PullState::ClosedUnmerged,
+                _ => continue,
+            }
+        };
+        out.insert(n, st);
+    }
+    Ok(Some(out))
+}
+
+/// Commits from a `commits_batch` response. `None`: no such repository.
+pub fn parse_graphql_commits(v: &serde_json::Value) -> Option<Vec<RemoteCommit>> {
+    let repo = v["data"]["repository"].as_object()?;
+    let login = |c: &serde_json::Value, who: &str| c[who]["user"]["login"].as_str().map(str::to_string);
+    Some(
+        repo.values()
+            .filter_map(|c| {
+                let sha = c["oid"].as_str()?.to_string();
+                // GraphQL states are the REST reasons in upper case; no signature is "unsigned".
+                let reason = c["signature"]["state"].as_str().map_or("unsigned".to_string(), str::to_ascii_lowercase);
+                Some(RemoteCommit {
+                    sha,
+                    verified: reason == "valid",
+                    reason,
+                    author_login: login(c, "author"),
+                    committer_login: login(c, "committer"),
+                })
+            })
+            .collect(),
+    )
 }
 
 fn http_error(status: u16, body: &str) -> String {
@@ -293,21 +490,18 @@ pub fn parse_activity(body: &str) -> Result<Vec<Push>, String> {
 
 pub fn parse_compare(body: &str) -> Result<(Vec<RemoteCommit>, usize), String> {
     let c: Compare = serde_json::from_str(body).map_err(|e| format!("unexpected GitHub compare response: {e}"))?;
-    let commits = c
-        .commits
-        .into_iter()
-        .map(|x| {
-            let (verified, reason) = x.commit.verification.map_or((false, String::new()), |v| (v.verified, v.reason));
-            RemoteCommit {
-                sha: x.sha,
-                verified,
-                reason,
-                author_login: x.author.map(|a| a.login),
-                committer_login: x.committer.map(|a| a.login),
-            }
-        })
-        .collect();
-    Ok((commits, c.total_commits))
+    Ok((c.commits.into_iter().map(remote_commit).collect(), c.total_commits))
+}
+
+fn remote_commit(x: CompareCommit) -> RemoteCommit {
+    let (verified, reason) = x.commit.verification.map_or((false, String::new()), |v| (v.verified, v.reason));
+    RemoteCommit {
+        sha: x.sha,
+        verified,
+        reason,
+        author_login: x.author.map(|a| a.login),
+        committer_login: x.committer.map(|a| a.login),
+    }
 }
 
 pub fn parse_pull(body: &str) -> Result<PullState, String> {
@@ -483,6 +677,39 @@ mod tests {
             parse_pull(r#"{"state":"closed","merged":false,"merged_at":null,"merge_commit_sha":"dd"}"#).unwrap(),
             PullState::ClosedUnmerged
         );
+    }
+
+    #[test]
+    fn graphql_batches() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"data":{"repository":{"p1":{"state":"MERGED","mergeCommit":{"oid":"aa"}},"p2":{"state":"OPEN","mergeCommit":null},
+            "p3":{"state":"CLOSED","mergeCommit":null},"p4":null}},"errors":[{"type":"NOT_FOUND","path":["repository","p4"]}]}"#,
+        )
+        .unwrap();
+        let m = parse_graphql_pulls(&v, &[1, 2, 3, 4]).unwrap().unwrap();
+        assert_eq!(m[&1], PullState::Merged { merge_commit_sha: "aa".into() });
+        assert_eq!((&m[&2], &m[&3], &m[&4]), (&PullState::Open, &PullState::ClosedUnmerged, &PullState::NotFound));
+        let hidden: serde_json::Value = serde_json::from_str(r#"{"data":{"repository":null}}"#).unwrap();
+        assert_eq!(parse_graphql_pulls(&hidden, &[1]).unwrap(), None);
+        assert_eq!(parse_graphql_commits(&hidden), None);
+
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"data":{"repository":{"c0":{"oid":"aa","signature":{"state":"VALID"},"author":{"user":{"login":"al"}},"committer":{"user":null}},
+            "c1":{"oid":"bb","signature":null,"author":{"user":null},"committer":{"user":null}},
+            "c2":{"oid":"cc","signature":{"state":"MALFORMED_SIG"},"author":null,"committer":null},"c3":null}}}"#,
+        )
+        .unwrap();
+        let mut c = parse_graphql_commits(&v).unwrap();
+        c.sort_by(|a, b| a.sha.cmp(&b.sha));
+        assert_eq!((c[0].verified, c[0].reason.as_str(), c[0].author_login.as_deref()), (true, "valid", Some("al")));
+        assert_eq!((c[1].verified, c[1].reason.as_str()), (false, "unsigned"));
+        assert_eq!(c[2].reason, "malformed_sig");
+        assert_eq!(c.len(), 3);
+
+        let c = Client::new("https://api.github.com".into(), "t".into());
+        assert_eq!(c.graphql_url(), "https://api.github.com/graphql");
+        let c = Client::new("https://ghe.example/api/v3".into(), "t".into());
+        assert_eq!(c.graphql_url(), "https://ghe.example/api/graphql");
     }
 
     #[test]

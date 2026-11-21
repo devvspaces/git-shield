@@ -20,10 +20,25 @@ pub struct Cache {
     /// `base...head` ranges already compared (commit ids never change meaning).
     #[serde(default)]
     ranges: std::collections::BTreeSet<String>,
+    /// Local verdicts against the bundled web-flow keyring, valid for `webflow_keyring`.
+    #[serde(default)]
+    webflow: BTreeMap<String, WebFlowVerdict>,
+    #[serde(default)]
+    webflow_keyring: String,
     #[serde(skip)]
     path: Option<PathBuf>,
     #[serde(skip)]
     dirty: bool,
+}
+
+/// A local check of a commit against GitHub's bundled web-flow keyring. The
+/// keyring is fixed per git-shield build, so the verdict cannot change while
+/// the keyring stays the same.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebFlowVerdict {
+    pub good: bool,
+    /// Signer when good, reason when bad.
+    pub detail: String,
 }
 
 /// Verification results that a later key upload or email change cannot flip.
@@ -86,6 +101,26 @@ impl Cache {
         }
     }
 
+    /// Use web-flow verdicts made with `keyring` (a hash); older ones are dropped.
+    pub fn set_keyring(&mut self, keyring: &str) {
+        if self.webflow_keyring != keyring {
+            self.webflow.clear();
+            self.webflow_keyring = keyring.to_string();
+            self.dirty = true;
+        }
+    }
+
+    pub fn webflow(&self, sha: &str) -> Option<&WebFlowVerdict> {
+        self.webflow.get(sha)
+    }
+
+    pub fn put_webflow(&mut self, sha: &str, v: WebFlowVerdict) {
+        if self.webflow.get(sha) != Some(&v) {
+            self.webflow.insert(sha.to_string(), v);
+            self.dirty = true;
+        }
+    }
+
     /// Write back if anything changed. Errors are ignored: the cache is an optimisation.
     pub fn save(&mut self) {
         let Some(path) = &self.path else { return };
@@ -131,6 +166,15 @@ mod tests {
         assert_eq!(back.pull(7), Some(PullState::Merged { merge_commit_sha: "m".into() }));
         assert_eq!(back.pull(8), None);
         assert!(back.compared("a", "b") && !back.compared("b", "a"));
+
+        let mut back = back;
+        back.set_keyring("k1");
+        back.put_webflow("a", WebFlowVerdict { good: true, detail: "GitHub".into() });
+        assert!(back.webflow("a").is_some());
+        back.set_keyring("k1");
+        assert!(back.webflow("a").is_some());
+        back.set_keyring("k2");
+        assert!(back.webflow("a").is_none());
 
         std::fs::write(&path, b"{not json").unwrap();
         let broken: Option<Cache> = serde_json::from_slice(&std::fs::read(&path).unwrap()).ok();

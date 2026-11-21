@@ -1,8 +1,9 @@
 //! `git shield clone` and `git shield checkout`: scan what would be written to
 //! the working tree before anything is written.
 
-use crate::{Common, accepted, emit, gate, note, now, preflight, scan, short};
+use crate::{Budget, Common, KnownTips, accepted, attest, emit, gate, gh_session, note, now, preflight, scan, short};
 use anyhow::{Context, Result, bail};
+use shield_core::{Report, ScanContext};
 use shield_git::hardened::HardenedGit;
 use shield_git::trust::TrustStore;
 use shield_git::{GitRepo, ObjectId};
@@ -15,11 +16,49 @@ fn default_dir(url: &str) -> String {
     if name.is_empty() { "repo".into() } else { name.into() }
 }
 
+/// Commits read at most for the signature pass (newest first).
+const HISTORY_LIMIT: usize = 50_000;
+
+/// Signature and pull-request checks over the commits `to` brings on top of
+/// `from` (all of its history when `from` is `None`). GitHub is asked by
+/// commit id, not by range: `from` may not exist on GitHub.
+fn signature_pass(
+    repo: &GitRepo,
+    from: Option<ObjectId>,
+    to: ObjectId,
+    label: &str,
+    no_github: bool,
+    require: bool,
+    common: &Common,
+) -> Result<Option<Report>> {
+    if common.no_verify_signatures && no_github {
+        return Ok(None);
+    }
+    let commits = repo.commits_since(from, to, HISTORY_LIMIT)?;
+    if commits.is_empty() {
+        return Ok(None);
+    }
+    if commits.len() == HISTORY_LIMIT {
+        note(&format!("checked the signatures and pull requests of the newest {HISTORY_LIMIT} commits only"));
+    }
+    let known = KnownTips {
+        session: if no_github { None } else { gh_session(repo, None, common) },
+        // A clone or checkout happens once; look at all of it.
+        budget: Budget::DEEP,
+        ..Default::default()
+    };
+    let attest = attest(repo, &commits, None, &known, common, require)?;
+    let ctx =
+        ScanContext { label: label.to_string(), tip: Some(to.to_string()), commits, attest, ..Default::default() };
+    Ok(Some(shield_core::run(&shield_rules::signing_only(), &ctx)))
+}
+
 pub fn clone(
     url: &str,
     dir: Option<PathBuf>,
     branch: Option<&str>,
     reason: Option<String>,
+    no_github: bool,
     common: &Common,
 ) -> Result<u8> {
     let dir = dir.unwrap_or_else(|| PathBuf::from(default_dir(url)));
@@ -43,7 +82,10 @@ pub fn clone(
     };
     let mut store = TrustStore::open(&repo)?;
     let label = format!("clone {url} ({})", repo.current_branch().unwrap_or_else(|| short(&head)));
-    let report = scan(&repo.tree_scan(head, label)?);
+    let mut report = scan(&repo.tree_scan(head, label.clone())?);
+    if let Some(sigs) = signature_pass(&repo, None, head, &label, no_github, false, common)? {
+        report.merge(sigs);
+    }
     let mut ok = accepted(common, Some(&store), &report, Some(&repo))?;
     emit(&report, &ok, common);
 
@@ -89,13 +131,23 @@ fn resolve_target(repo: &GitRepo, target: &str) -> Result<ObjectId> {
     }
 }
 
-pub fn checkout(target: &str, reason: Option<String>, allow_unsafe_config: bool, common: &Common) -> Result<u8> {
+pub fn checkout(
+    target: &str,
+    reason: Option<String>,
+    allow_unsafe_config: bool,
+    no_github: bool,
+    common: &Common,
+) -> Result<u8> {
     let repo = GitRepo::discover(&common.repo)?;
     preflight(&repo, allow_unsafe_config, true, common)?;
     let mut store = TrustStore::open(&repo)?;
     let head = repo.resolve("HEAD")?;
     let to = resolve_target(&repo, target)?;
-    let report = scan(&repo.tree_delta(head, to, format!("checkout {target} (HEAD → {})", short(&to)))?);
+    let label = format!("checkout {target} (HEAD → {})", short(&to));
+    let mut report = scan(&repo.tree_delta(head, to, label.clone())?);
+    if let Some(sigs) = signature_pass(&repo, Some(head), to, &label, no_github, true, common)? {
+        report.merge(sigs);
+    }
     let mut ok = accepted(common, Some(&store), &report, Some(&repo))?;
     emit(&report, &ok, common);
     let Some(decision) = gate(&report, &mut ok, common, reason, "checkout", "HEAD and the working tree are unchanged")?

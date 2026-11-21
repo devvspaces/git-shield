@@ -330,10 +330,21 @@ pub fn fake_github(routes: Vec<(String, u16, String)>) -> FakeGitHub {
             if reader.read_line(&mut line).is_err() {
                 continue;
             }
-            // Drain headers.
+            // Drain headers, then any request body (GraphQL POSTs).
             let mut h = String::new();
+            let mut len = 0usize;
             while reader.read_line(&mut h).is_ok_and(|n| n > 2) {
+                if let Some((k, v)) = h.split_once(':')
+                    && k.eq_ignore_ascii_case("content-length")
+                {
+                    len = v.trim().parse().unwrap_or(0);
+                }
                 h.clear();
+            }
+            if len > 0 {
+                use std::io::Read as _;
+                let mut body = vec![0; len];
+                let _ = reader.read_exact(&mut body);
             }
             let target = line.split_whitespace().nth(1).unwrap_or("");
             let path = target.split('?').next().unwrap_or("");
@@ -350,6 +361,31 @@ pub fn fake_github(routes: Vec<(String, u16, String)>) -> FakeGitHub {
         }
     });
     FakeGitHub { url, hits }
+}
+
+/// A GraphQL `pulls_batch` answer: `(number, Some(merge sha) | None for open)`;
+/// numbers left out are unknown (null). One response serves every chunk.
+pub fn graphql_pulls_json(prs: &[(u64, Option<&str>)]) -> String {
+    let fields: Vec<String> = prs
+        .iter()
+        .map(|(n, sha)| match sha {
+            Some(s) => format!(r#""p{n}":{{"state":"MERGED","mergeCommit":{{"oid":"{s}"}}}}"#),
+            None => format!(r#""p{n}":{{"state":"OPEN","mergeCommit":null}}"#),
+        })
+        .collect();
+    format!(r#"{{"data":{{"repository":{{{}}}}}}}"#, fields.join(","))
+}
+
+/// A GraphQL `commits_batch` answer: `(sha, state)`, e.g. `("…", "VALID")`.
+pub fn graphql_commits_json(commits: &[(&str, &str)]) -> String {
+    let fields: Vec<String> = commits
+        .iter()
+        .enumerate()
+        .map(|(i, (sha, st))| {
+            format!(r#""c{i}":{{"oid":"{sha}","signature":{{"state":"{st}"}},"author":null,"committer":null}}"#)
+        })
+        .collect();
+    format!(r#"{{"data":{{"repository":{{{}}}}}}}"#, fields.join(","))
 }
 
 /// One activity-log entry as GitHub returns it.

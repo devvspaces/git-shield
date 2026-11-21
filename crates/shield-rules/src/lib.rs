@@ -22,6 +22,13 @@ pub use util::{glob_match, parse_jsonc};
 
 /// All built-in detectors. Context detectors run in this order; the
 /// correlation step (`TamperedPayload`) must stay last.
+/// Only the commit-signature checks, for history that is checked out rather
+/// than pulled (`clone`, `checkout`): the other context rules compare a pull
+/// against what you had before, which does not apply there.
+pub fn signing_only() -> Vec<Box<dyn Detector>> {
+    vec![Box::new(signing::Signatures), Box::new(signing::PushAttribution)]
+}
+
 pub fn builtin() -> Vec<Box<dyn Detector>> {
     vec![
         Box::new(vscode::Tasks),

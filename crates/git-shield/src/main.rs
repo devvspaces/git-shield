@@ -43,6 +43,15 @@ enum Command {
         /// Also look up the branch's force-push history on GitHub (network).
         #[arg(long)]
         github: bool,
+        /// GitHub branch whose push history explains the range, when the range
+        /// end is not a remote-tracking ref (default: the upstream branch, if it
+        /// contains the range end).
+        #[arg(long, value_name = "BRANCH", requires = "github")]
+        github_branch: Option<String>,
+        /// Forensic depth: read far more GitHub history, commits and pull
+        /// requests than the defaults used by check/pull.
+        #[arg(long)]
+        deep: bool,
         #[command(flatten)]
         common: Common,
     },
@@ -111,6 +120,9 @@ enum Command {
         /// Why accepted findings are fine (stored with them).
         #[arg(long, value_name = "TEXT")]
         reason: Option<String>,
+        /// Do not ask GitHub about commit signatures and pull requests.
+        #[arg(long)]
+        no_github: bool,
         #[command(flatten)]
         common: Common,
     },
@@ -122,6 +134,9 @@ enum Command {
         /// Run git even if the local git config contains settings that execute programs.
         #[arg(long)]
         allow_unsafe_config: bool,
+        /// Do not ask GitHub about commit signatures and pull requests.
+        #[arg(long)]
+        no_github: bool,
         #[command(flatten)]
         common: Common,
     },
@@ -247,36 +262,48 @@ fn now() -> i64 {
 
 fn run(cli: Cli) -> Result<u8> {
     match cli.command {
-        Command::Scan { range, previous_tip, github, common } => {
+        Command::Scan { range, previous_tip, github, github_branch, deep, common } => {
             let repo = GitRepo::discover(&common.repo)?;
             let store = TrustStore::open(&repo)?;
             let (from, to, b, label) = resolve_range(&repo, range.as_deref())?;
             let given =
                 previous_tip.iter().map(|r| Ok((repo.resolve(r)?, TipSource::Given))).collect::<Result<Vec<_>>>()?;
             let full = repo.full_ref_name(&b);
+            let budget = if deep { Budget::DEEP } else { Budget::DEFAULT };
             let mut gh = KnownTips::default();
+            let mut ref_name = full.clone();
             if github {
-                match full.as_deref().and_then(|r| r.strip_prefix("refs/remotes/")).and_then(|r| r.split_once('/')) {
+                let at_ref = full
+                    .as_deref()
+                    .and_then(|r| r.strip_prefix("refs/remotes/"))
+                    .and_then(|r| r.split_once('/'))
+                    .map(|(r, b)| (r.to_string(), b.to_string()));
+                match at_ref.or_else(|| history_branch(&repo, to, github_branch.as_deref(), &common)) {
                     Some((remote, branch)) => {
+                        let tracking = format!("refs/remotes/{remote}/{branch}");
                         gh = github_tips(
                             &repo,
                             &store,
-                            full.as_deref().unwrap(),
-                            remote,
-                            branch,
+                            &tracking,
+                            &remote,
+                            &branch,
                             to,
                             Some(from),
                             false,
+                            budget,
                             &common,
                         );
                     }
-                    // Not a remote-tracking ref: no force-push history, but commits and PRs can still be checked.
+                    // No branch to ask about: commits and PRs can still be checked.
                     None => gh.session = gh_session(&repo, None, &common),
                 }
             }
+            gh.budget = budget;
             gh.tips.splice(0..0, given);
-            // Provenance needs a ref; with only --previous-tip, use the range end itself.
-            let ref_name = full.or_else(|| (!gh.tips.is_empty()).then(|| b.clone()));
+            // Provenance needs a ref; without one, use the range end itself.
+            if ref_name.is_none() && !gh.tips.is_empty() {
+                ref_name = Some(b.clone());
+            }
             let ctx = build_context(&repo, &store, from, to, label, ref_name.as_deref(), &gh, &common)?;
             let report = scan(&ctx);
             Ok(emit(&report, &accepted(&common, Some(&store), &report, Some(&repo))?, &common))
@@ -307,6 +334,7 @@ fn run(cli: Cli) -> Result<u8> {
                     to,
                     repo.resolve("HEAD").ok(),
                     !no_fetch,
+                    Budget::DEFAULT,
                     &common,
                 )
             };
@@ -332,11 +360,11 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Doctor { json } => doctor::run(json),
         Command::Install { shell, rc, write } => install::install(shell.as_deref(), rc, write),
         Command::Uninstall { shell, rc } => install::uninstall(shell.as_deref(), rc),
-        Command::Clone { url, dir, branch, reason, common } => {
-            worktree::clone(&url, dir, branch.as_deref(), reason, &common)
+        Command::Clone { url, dir, branch, reason, no_github, common } => {
+            worktree::clone(&url, dir, branch.as_deref(), reason, no_github, &common)
         }
-        Command::Checkout { target, reason, allow_unsafe_config, common } => {
-            worktree::checkout(&target, reason, allow_unsafe_config, &common)
+        Command::Checkout { target, reason, allow_unsafe_config, no_github, common } => {
+            worktree::checkout(&target, reason, allow_unsafe_config, no_github, &common)
         }
         Command::Config { action } => {
             let path = config::path().map(|p| p.display().to_string()).unwrap_or_else(|| "(no HOME)".into());
@@ -444,7 +472,18 @@ fn pull(target: Target, rebase: bool, merge: bool, reason: Option<String>, commo
     let mut gh = if target.no_github {
         KnownTips::default()
     } else {
-        github_tips(&repo, &store, &tracking, &remote, &branch, tip, repo.resolve("HEAD").ok(), true, &common)
+        github_tips(
+            &repo,
+            &store,
+            &tracking,
+            &remote,
+            &branch,
+            tip,
+            repo.resolve("HEAD").ok(),
+            true,
+            Budget::DEFAULT,
+            &common,
+        )
     };
     gh.tips.splice(0..0, prefetch.map(|p| (p, TipSource::PreFetch)));
     let repo = if gh.fetched { GitRepo::discover(&common.repo)? } else { repo };
@@ -601,7 +640,8 @@ fn build_context(
     common: &Common,
 ) -> Result<ScanContext> {
     let mut ctx = repo.incoming(from, to, label)?;
-    attest(repo, &mut ctx, known, common)?;
+    let range = ctx.base.as_deref().zip(ctx.tip.as_deref());
+    ctx.attest = attest(repo, &ctx.commits, range, known, common, true)?;
     let Some(ref_name) = ref_name else { return Ok(ctx) };
     let t = now();
     let mut extra = known.tips.clone();
@@ -640,7 +680,36 @@ struct KnownTips {
     branch: Option<String>,
     /// Last pull recorded in the trust store (unix seconds).
     since: Option<i64>,
+    budget: Budget,
 }
+
+/// How much GitHub history and how many commits one scan looks at.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Budget {
+    /// Activity-log pages (100 events each).
+    activity_pages: usize,
+    /// Signed commits verified locally.
+    sig_checks: usize,
+    /// Signed commits GitHub did not list in compare, looked up by id.
+    remote_sigs: usize,
+    /// Distinct "Merge pull request #N" numbers looked up.
+    prs: usize,
+}
+
+impl Budget {
+    pub(crate) const DEFAULT: Budget = Budget { activity_pages: 10, sig_checks: 2000, remote_sigs: 2000, prs: 1000 };
+    /// `scan --deep`.
+    const DEEP: Budget = Budget { activity_pages: 50, sig_checks: 5000, remote_sigs: 5000, prs: 5000 };
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Budget::DEFAULT
+    }
+}
+
+/// REST lookups made at most when GraphQL is unavailable.
+const REST_FALLBACK: usize = 100;
 
 struct GhSession {
     client: shield_github::Client,
@@ -696,13 +765,11 @@ fn github_tips(
     new_tip: ObjectId,
     head: Option<ObjectId>,
     fetch_missing: bool,
+    budget: Budget,
     common: &Common,
 ) -> KnownTips {
-    let mut out = KnownTips {
-        branch: Some(branch.to_string()),
-        since: store.trusted_tip(ref_name).map(|t| t.at),
-        ..Default::default()
-    };
+    let since = store.trusted_tip(ref_name).map(|t| t.at);
+    let mut out = KnownTips { branch: Some(branch.to_string()), since, budget, ..Default::default() };
     let Some(session) = gh_session(repo, Some(remote), common) else { return out };
     let client = &session.client;
     let slug = (session.owner.clone(), session.name.clone());
@@ -715,7 +782,7 @@ fn github_tips(
             return out;
         }
     };
-    let events = match client.force_pushes(&slug.0, &slug.1, branch) {
+    let log = match client.force_pushes(&slug.0, &slug.1, branch, budget.activity_pages) {
         Ok(v) => v,
         Err(e) => {
             fail(e);
@@ -723,9 +790,23 @@ fn github_tips(
             return out;
         }
     };
-    let since = store.trusted_tip(ref_name).map(|t| t.at);
+    if log.truncated
+        && let Some(oldest) = log.oldest()
+        && since.is_none_or(|s| oldest > s)
+    {
+        note(&format!(
+            "GitHub's force-push log was read back to {} ({} events); older force-pushes not checked{}",
+            date(oldest),
+            log.events.len(),
+            if budget.activity_pages < Budget::DEEP.activity_pages {
+                " (scan --github --deep reads further)"
+            } else {
+                ""
+            }
+        ));
+    }
     let mut to_fetch = Vec::new();
-    for e in events {
+    for e in log.events {
         // The user's own force-pushes (e.g. restoring the branch) are deliberate.
         if e.actor.eq_ignore_ascii_case(&viewer) || since.is_some_and(|s| e.at <= s) {
             continue;
@@ -769,45 +850,85 @@ fn github_tips(
     out
 }
 
-/// At most this many signed incoming commits are verified locally per scan.
-const MAX_SIG_CHECKS: usize = 300;
-/// At most this many distinct "Merge pull request #N" numbers are looked up per scan.
-const MAX_PR_LOOKUPS: usize = 100;
 /// Commits walked per activity event when attributing pushes.
 const PUSH_WALK_LIMIT: usize = 5000;
 
-/// Collect signature and GitHub evidence about the incoming commits.
-fn attest(repo: &GitRepo, ctx: &mut ScanContext, known: &KnownTips, common: &Common) -> Result<()> {
-    if ctx.commits.is_empty() {
-        return Ok(());
+/// Collect signature and GitHub evidence about `commits`.
+/// `range` (`base`, `tip`) enables GitHub's compare API.
+/// `require` applies the user's `[[signing]] require` policy (not on clone,
+/// whose history predates any policy).
+pub(crate) fn attest(
+    repo: &GitRepo,
+    commits: &[CommitInfo],
+    range: Option<(&str, &str)>,
+    known: &KnownTips,
+    common: &Common,
+    require: bool,
+) -> Result<Option<Attestations>> {
+    if commits.is_empty() {
+        return Ok(None);
     }
     let policy = config::load()?.signing_for(&repo_ids(repo));
-    let mut a = Attestations { require_signed: policy.require, ..Default::default() };
+    if !require && policy.require {
+        note("[[signing]] require is not applied to existing history; it applies to what later pulls bring in");
+    }
+    let mut a = Attestations { require_signed: require && policy.require, ..Default::default() };
+    let mut cache = known.session.as_ref().map(|s| shield_github::cache::Cache::load(&s.owner, &s.name));
+    if let Some(c) = &mut cache {
+        c.set_keyring(&shield_git::signing::keyring_id());
+    }
     if !common.no_verify_signatures {
         let allowed = policy
             .allowed_signers
             .or_else(|| doctor::git_global("gpg.ssh.allowedSignersFile").map(|p| config::expand_home(&p)));
-        verify_local(repo, &ctx.commits, allowed, &mut a);
+        verify_local(repo, commits, allowed, known.budget, cache.as_mut(), &mut a);
     }
-    if let Some(s) = &known.session {
-        github_attest(repo, ctx, s, known, &mut a);
+    if let (Some(s), Some(c)) = (&known.session, &mut cache) {
+        github_attest(repo, commits, range, s, known, c, &mut a);
     }
-    ctx.attest = Some(a);
-    Ok(())
+    if let Some(c) = &mut cache {
+        c.save();
+    }
+    Ok(Some(a))
 }
 
-fn verify_local(repo: &GitRepo, commits: &[CommitInfo], allowed: Option<PathBuf>, a: &mut Attestations) {
+fn verify_local(
+    repo: &GitRepo,
+    commits: &[CommitInfo],
+    allowed: Option<PathBuf>,
+    budget: Budget,
+    mut cache: Option<&mut shield_github::cache::Cache>,
+    a: &mut Attestations,
+) {
+    use shield_core::{SigCheck, SigFormat, SigStatus};
+    use shield_github::cache::WebFlowVerdict;
     let signed: Vec<&CommitInfo> = commits.iter().filter(|c| c.signed).collect();
     if signed.is_empty() {
         return;
     }
-    if signed.len() > MAX_SIG_CHECKS {
-        note(&format!("{} signed commits incoming; verified the newest {MAX_SIG_CHECKS} locally", signed.len()));
+    if signed.len() > budget.sig_checks {
+        note(&format!("{} signed commits incoming; verified the newest {} locally", signed.len(), budget.sig_checks));
+    }
+    let web_flow = |c: &CommitInfo| c.committer_email.eq_ignore_ascii_case(shield_git::signing::GITHUB_EMAIL);
+    let mut todo = Vec::new();
+    for c in signed.into_iter().take(budget.sig_checks) {
+        // GitHub's own signatures were checked before against the same bundled keyring.
+        if web_flow(c)
+            && let Some(v) = cache.as_deref().and_then(|k| k.webflow(&c.id))
+        {
+            let status =
+                if v.good { SigStatus::Good { signer: v.detail.clone() } } else { SigStatus::Bad(v.detail.clone()) };
+            a.local.insert(c.id.clone(), SigCheck { format: SigFormat::Gpg, status, web_flow: true });
+        } else {
+            todo.push(c);
+        }
+    }
+    if todo.is_empty() {
+        return;
     }
     // Extraction reads the object database (single-threaded); verification runs in parallel.
-    let jobs: Vec<(&CommitInfo, shield_git::signing::SignedCommit)> = signed
+    let jobs: Vec<(&CommitInfo, shield_git::signing::SignedCommit)> = todo
         .into_iter()
-        .take(MAX_SIG_CHECKS)
         .filter_map(|c| {
             let id = ObjectId::from_hex(c.id.as_bytes()).ok()?;
             Some((c, repo.commit_signature(id).ok()??))
@@ -820,83 +941,179 @@ fn verify_local(repo: &GitRepo, commits: &[CommitInfo], allowed: Option<PathBuf>
             return;
         }
     };
-    let results: Vec<(String, shield_core::SigCheck)> =
+    let results: Vec<(String, SigCheck)> =
         jobs.par_iter().map(|(c, s)| (c.id.clone(), v.verify(s, &c.committer_email))).collect();
-    a.local.extend(results);
+    for (id, check) in results {
+        if check.web_flow
+            && check.format == SigFormat::Gpg
+            && let Some(k) = cache.as_deref_mut()
+        {
+            match &check.status {
+                SigStatus::Good { signer } => k.put_webflow(&id, WebFlowVerdict { good: true, detail: signer.clone() }),
+                SigStatus::Bad(why) => k.put_webflow(&id, WebFlowVerdict { good: false, detail: why.clone() }),
+                _ => {}
+            }
+        }
+        a.local.insert(id, check);
+    }
     for n in v.notes() {
         note(&n);
     }
 }
 
-fn github_attest(repo: &GitRepo, ctx: &ScanContext, s: &GhSession, known: &KnownTips, a: &mut Attestations) {
-    let mut cache = shield_github::cache::Cache::load(&s.owner, &s.name);
-    let mut fresh: HashMap<String, shield_github::RemoteCommit> = HashMap::new();
-    // GitHub answers 404 for anything in a repository the token cannot see, so a
-    // missing PR only means "does not exist" once the repository answered.
-    // None: not established this run (e.g. compare answered from the cache).
-    let mut repo_ok: Option<bool> = None;
-    if let (Some(base), Some(tip)) = (&ctx.base, &ctx.tip)
-        && !cache.compared(base, tip)
-        && ctx.commits.iter().any(|c| cache.commit(&c.id).is_none())
-    {
-        match s.client.compare(&s.owner, &s.name, base, tip) {
-            Ok((list, total)) => {
-                cache.put_compared(base, tip);
-                repo_ok = Some(true);
-                if total > list.len() {
-                    note(&format!(
-                        "GitHub listed {} of {total} commits; the rest were not checked against GitHub",
-                        list.len()
-                    ));
-                }
-                for rc in list {
-                    cache.put_commit(&rc);
-                    fresh.insert(rc.sha.clone(), rc);
-                }
-            }
-            Err(e) => {
-                repo_ok = Some(false);
-                note(&format!("{e}; GitHub commit verification and pull requests not checked"));
-            }
-        }
+fn remote_verification(rc: &shield_github::RemoteCommit) -> RemoteVerification {
+    RemoteVerification {
+        verified: rc.verified,
+        reason: rc.reason.clone(),
+        author_login: rc.author_login.clone(),
+        committer_login: rc.committer_login.clone(),
     }
-    for c in &ctx.commits {
-        if let Some(rc) = fresh.get(&c.id).or_else(|| cache.commit(&c.id)) {
-            a.github.insert(
-                c.id.clone(),
-                RemoteVerification {
-                    verified: rc.verified,
-                    reason: rc.reason.clone(),
-                    author_login: rc.author_login.clone(),
-                    committer_login: rc.committer_login.clone(),
-                },
-            );
-        }
-    }
+}
 
+fn pr_state(st: shield_github::PullState) -> PrState {
+    match st {
+        shield_github::PullState::Merged { merge_commit_sha } => PrState::Merged { merge_commit_sha },
+        shield_github::PullState::Open => PrState::Open,
+        shield_github::PullState::ClosedUnmerged => PrState::ClosedUnmerged,
+        shield_github::PullState::NotFound => PrState::NotFound,
+    }
+}
+
+fn github_attest(
+    repo: &GitRepo,
+    commits: &[CommitInfo],
+    range: Option<(&str, &str)>,
+    s: &GhSession,
+    known: &KnownTips,
+    cache: &mut shield_github::cache::Cache,
+    a: &mut Attestations,
+) {
+    use shield_github::PullState;
+    let budget = known.budget;
+    for c in commits {
+        if let Some(rc) = cache.commit(&c.id) {
+            a.github.insert(c.id.clone(), remote_verification(rc));
+        }
+    }
+    // What is still unknown. GitHub's verdict on an unsigned commit is always
+    // "unsigned", already known locally, so only signed commits are looked up.
+    let signed: Vec<String> =
+        commits.iter().filter(|c| c.signed && !a.github.contains_key(&c.id)).map(|c| c.id.clone()).collect();
+    let take = signed.len().min(budget.remote_sigs);
+    if take < signed.len() {
+        note(&format!("{} signed commits; checked the newest {take} against GitHub", signed.len()));
+    }
+    let signed = &signed[..take];
     let mut nums: Vec<u64> = Vec::new();
-    for n in ctx.commits.iter().filter_map(|c| shield_rules::claimed_pr(&c.summary)) {
+    for n in commits.iter().filter_map(|c| shield_rules::claimed_pr(&c.summary)) {
         if !nums.contains(&n) {
             nums.push(n);
         }
     }
-    if repo_ok == Some(false) {
-        nums.clear();
+    if nums.len() > budget.prs {
+        note(&format!("{} merged PRs claimed; checked the newest {} on GitHub", nums.len(), budget.prs));
+        nums.truncate(budget.prs);
     }
-    if nums.len() > MAX_PR_LOOKUPS {
-        note(&format!("{} merged PRs claimed; checked the newest {MAX_PR_LOOKUPS} on GitHub", nums.len()));
-        nums.truncate(MAX_PR_LOOKUPS);
-    }
-    // Uncached lookups run in parallel; the first error stops further use of the answers.
     let uncached: Vec<u64> = nums.iter().copied().filter(|n| cache.pull(*n).is_none()).collect();
+    // The first compare page proves the repository answers (a 404 elsewhere
+    // then means "does not exist") and covers short ranges in one request.
+    let compare = range.filter(|(b, t)| !cache.compared(b, t) && commits.iter().any(|c| !a.github.contains_key(&c.id)));
+
+    // Independent requests: run them at the same time.
+    let (cmp, sigs, prs) = std::thread::scope(|sc| {
+        let cmp = compare.map(|(b, t)| sc.spawn(move || s.client.compare(&s.owner, &s.name, b, t, 1)));
+        let sigs = (!signed.is_empty()).then(|| sc.spawn(|| s.client.commits_batch(&s.owner, &s.name, signed)));
+        let prs = (!uncached.is_empty()).then(|| sc.spawn(|| s.client.pulls_batch(&s.owner, &s.name, &uncached)));
+        fn join<T>(h: std::thread::ScopedJoinHandle<'_, T>) -> T {
+            h.join().expect("GitHub request thread panicked")
+        }
+        (cmp.map(join), sigs.map(join), prs.map(join))
+    });
+
+    // GitHub answers 404 for anything in a repository the token cannot see, so a
+    // missing PR only means "does not exist" once the repository answered.
+    // None: not established this run (e.g. everything came from the cache).
+    let mut repo_ok: Option<bool> = None;
+    match cmp {
+        Some(Ok((list, _))) => {
+            let (b, t) = compare.expect("compare ran");
+            cache.put_compared(b, t);
+            repo_ok = Some(true);
+            for rc in list {
+                cache.put_commit(&rc);
+                a.github.insert(rc.sha.clone(), remote_verification(&rc));
+            }
+        }
+        Some(Err(e)) => {
+            note(&format!("{e}; GitHub commit verification and pull requests not checked"));
+            return;
+        }
+        None => {}
+    }
+    let found = match sigs {
+        None => Ok(Vec::new()),
+        Some(Ok(Some(v))) => {
+            repo_ok = Some(true);
+            Ok(v)
+        }
+        Some(Ok(None)) => {
+            note("GitHub does not show this repository to your token; commits and pull requests not checked");
+            return;
+        }
+        // GraphQL unavailable (e.g. some GitHub Enterprise setups): REST, one commit at a time.
+        Some(Err(_)) => {
+            let rest: Vec<&String> =
+                signed.iter().filter(|id| !a.github.contains_key(*id)).take(REST_FALLBACK).collect();
+            let got: Vec<_> = rest.par_iter().map(|sha| s.client.commit(&s.owner, &s.name, sha)).collect();
+            got.into_iter().filter_map(|r| r.transpose()).collect::<Result<Vec<_>, String>>()
+        }
+    };
+    match found {
+        Ok(list) => {
+            for rc in list {
+                cache.put_commit(&rc);
+                a.github.insert(rc.sha.clone(), remote_verification(&rc));
+            }
+        }
+        Err(e) => note(&format!("{e}; signed commits not checked against GitHub")),
+    }
+
+    let mut answers: HashMap<u64, PullState> = match prs {
+        None => HashMap::new(),
+        Some(Ok(Some(m))) => m,
+        Some(Ok(None)) => {
+            note("GitHub does not show this repository to your token; pull requests not checked");
+            HashMap::new()
+        }
+        Some(Err(_)) => rest_pulls(s, &uncached, repo_ok),
+    };
+    for (n, st) in &answers {
+        cache.put_pull(*n, st);
+    }
+    for n in nums {
+        let Some(state) = cache.pull(n).or_else(|| answers.remove(&n)) else { continue };
+        a.prs.insert(n, pr_state(state));
+    }
+
+    if let Some(branch) = &known.branch {
+        let base = range.and_then(|(b, _)| ObjectId::from_hex(b.as_bytes()).ok());
+        attribute_pushes(repo, commits, base, s, branch, known, a);
+    }
+}
+
+/// PR states one REST call at a time (GraphQL unavailable, e.g. some GHES).
+fn rest_pulls(s: &GhSession, nums: &[u64], repo_ok: Option<bool>) -> HashMap<u64, shield_github::PullState> {
+    if nums.len() > REST_FALLBACK {
+        note(&format!("GitHub GraphQL unavailable; checked {REST_FALLBACK} of {} pull requests", nums.len()));
+    }
+    let nums = &nums[..nums.len().min(REST_FALLBACK)];
     let fetched: Vec<(u64, Result<shield_github::PullState, String>)> =
-        uncached.par_iter().map(|&n| (n, s.client.pull(&s.owner, &s.name, n))).collect();
-    let mut answers: HashMap<u64, shield_github::PullState> = HashMap::new();
+        nums.par_iter().map(|&n| (n, s.client.pull(&s.owner, &s.name, n))).collect();
+    let mut answers = HashMap::new();
     let mut failed = false;
     for (n, r) in fetched {
         match r {
             Ok(st) => {
-                cache.put_pull(n, &st);
                 answers.insert(n, st);
             }
             Err(e) if !failed => {
@@ -913,61 +1130,105 @@ fn github_attest(repo: &GitRepo, ctx: &ScanContext, s: &GhSession, known: &Known
         note("GitHub does not show this repository to your token; pull requests not checked");
         answers.retain(|_, st| *st != shield_github::PullState::NotFound);
     }
-    for n in nums {
-        let Some(state) = cache.pull(n).or_else(|| answers.remove(&n)) else { continue };
-        let st = match state {
-            shield_github::PullState::Merged { merge_commit_sha } => PrState::Merged { merge_commit_sha },
-            shield_github::PullState::Open => PrState::Open,
-            shield_github::PullState::ClosedUnmerged => PrState::ClosedUnmerged,
-            shield_github::PullState::NotFound => PrState::NotFound,
-        };
-        a.prs.insert(n, st);
-    }
-    cache.save();
+    answers
+}
 
-    if let Some(branch) = &known.branch {
-        match s.client.activity(&s.owner, &s.name, branch, None, known.since) {
-            Ok(events) => attribute_pushes(repo, ctx, &events, known.since, a),
-            Err(e) => note(&format!("{e}; push history not checked")),
+/// For each incoming commit, the latest push event that brought it in. Reads
+/// the activity log newest first and stops once every commit is explained, or
+/// at a push that left the branch inside `base` (nothing incoming existed on
+/// the branch then, so older pushes cannot have introduced it).
+fn attribute_pushes(
+    repo: &GitRepo,
+    commits: &[CommitInfo],
+    base: Option<ObjectId>,
+    s: &GhSession,
+    branch: &str,
+    known: &KnownTips,
+    a: &mut Attestations,
+) {
+    let incoming: HashSet<&str> = commits.iter().map(|c| c.id.as_str()).collect();
+    let since = known.since;
+    let mut found: HashMap<String, PushedBy> = HashMap::new();
+    let mut done = 0;
+    let mut reached_base = false;
+    let log = s.client.activity(&s.owner, &s.name, branch, None, since, known.budget.activity_pages, |events| {
+        for e in &events[done..] {
+            if since.is_some_and(|t| e.at <= t) {
+                continue;
+            }
+            let Ok(after) = ObjectId::from_hex(e.after.as_bytes()) else { continue };
+            if after.is_null() || !repo.has_object(after) {
+                continue;
+            }
+            if base.is_some_and(|b| after == b || repo.is_ancestor(after, b).unwrap_or(false)) {
+                reached_base = true;
+                break;
+            }
+            let hide = match ObjectId::from_hex(e.before.as_bytes()) {
+                Ok(b) if repo.has_object(b) => b,
+                // Branch creation (copies commits that already exist elsewhere), or an
+                // unknown starting point: cannot tell which commits this push added.
+                _ => continue,
+            };
+            for id in repo.commit_ids(after, Some(hide), PUSH_WALK_LIMIT).unwrap_or_default() {
+                let h = id.to_string();
+                if incoming.contains(h.as_str()) {
+                    // Newest first: the push that last brought the commit in.
+                    found.entry(h).or_insert_with(|| PushedBy {
+                        login: e.actor.clone(),
+                        kind: e.kind.clone(),
+                        at: e.at,
+                    });
+                }
+            }
         }
+        done = events.len();
+        reached_base || found.len() == incoming.len()
+    });
+    match log {
+        Ok(log) => {
+            if log.truncated
+                && found.len() < incoming.len()
+                && let Some(oldest) = log.oldest()
+            {
+                note(&format!(
+                    "GitHub activity read back to {} ({} events); older pushes not attributed",
+                    date(oldest),
+                    log.events.len()
+                ));
+            }
+            a.pushes.extend(found);
+        }
+        Err(e) => note(&format!("{e}; push history not checked")),
     }
 }
 
-/// For each incoming commit, the oldest push event that introduced it.
-fn attribute_pushes(
-    repo: &GitRepo,
-    ctx: &ScanContext,
-    events: &[shield_github::Push],
-    since: Option<i64>,
-    a: &mut Attestations,
-) {
-    let incoming: HashSet<&str> = ctx.commits.iter().map(|c| c.id.as_str()).collect();
-    for e in events.iter().rev() {
-        if since.is_some_and(|s| e.at <= s) {
-            continue;
-        }
-        let Ok(after) = ObjectId::from_hex(e.after.as_bytes()) else { continue };
-        if after.is_null() || !repo.has_object(after) {
-            continue;
-        }
-        let hide = match ObjectId::from_hex(e.before.as_bytes()) {
-            Ok(b) if b.is_null() => None,
-            Ok(b) if repo.has_object(b) => Some(b),
-            // Unknown starting point: cannot tell which commits this push added.
-            _ => continue,
-        };
-        for id in repo.commit_ids(after, hide, PUSH_WALK_LIMIT).unwrap_or_default() {
-            let h = id.to_string();
-            if incoming.contains(h.as_str()) {
-                a.pushes.entry(h).or_insert_with(|| PushedBy {
-                    login: e.actor.clone(),
-                    kind: e.kind.clone(),
-                    at: e.at,
-                });
+/// Remote and branch whose GitHub history explains a range ending at `to`
+/// that is not itself a remote-tracking ref: `--github-branch`, else a remote
+/// branch whose tip is `to`, else the remote's default branch when it contains
+/// `to`. Feature branches are never guessed: they usually contain all of the
+/// integration branch, and their creation would claim every commit.
+fn history_branch(repo: &GitRepo, to: ObjectId, given: Option<&str>, common: &Common) -> Option<(String, String)> {
+    let remote = repo.upstream().ok().map(|u| u.remote).unwrap_or_else(|| "origin".into());
+    if let Some(b) = given {
+        return Some((remote, b.to_string()));
+    }
+    let branches = repo.remote_branches(&remote);
+    let found = branches.iter().find(|(_, tip)| *tip == to).map(|(b, _)| b.clone()).or_else(|| {
+        let def = repo.remote_default_branch(&remote)?;
+        let tip = branches.iter().find(|(b, _)| *b == def)?.1;
+        (tip == to || repo.is_ancestor(to, tip).unwrap_or(false)).then_some(def)
+    });
+    match found {
+        Some(b) => {
+            if !common.json {
+                eprintln!("git-shield: using the GitHub push history of {remote}/{b}");
             }
+            Some((remote, b))
         }
-        if a.pushes.len() == incoming.len() {
-            break;
+        None => {
+            note("pass --github-branch BRANCH to also check who pushed these commits and the force-push log");
+            None
         }
     }
 }

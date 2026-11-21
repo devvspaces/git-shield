@@ -978,3 +978,164 @@ fn ssh_signatures_are_verified() {
     let (_, v) = json_check(&bad, &["--no-fetch", "--no-verify-signatures"]);
     assert!(finding(&v, "t11.signature-bad").is_none());
 }
+
+// ---- Session 7: GraphQL batches, ranges off a ref, clone/checkout ----
+
+fn graphql_route(body: String) -> (String, u16, String) {
+    ("/graphql".into(), 200, body)
+}
+
+#[test]
+fn pull_requests_are_batched_through_graphql() {
+    let (f, real, forged) = incident_without_local_memory();
+    let (base, tip, _, cleanup) = incident_range(&f);
+    // No REST pulls route: only the GraphQL answer can name the real merge.
+    let gh = fx::fake_github(vec![
+        viewer("victim"),
+        activity(&[]),
+        compare_route(
+            &base,
+            &tip,
+            fx::compare_json(&[(&forged, false, "unsigned", None), (&cleanup, false, "unsigned", None)]),
+        ),
+        graphql_route(fx::graphql_pulls_json(&[(2921, Some(&real))])),
+    ]);
+    let (code, v, err) = github(&f, &gh, &[]);
+    assert_eq!(code, 2, "{err}\n{:#?}", rules(&v));
+    let m = finding(&v, "t11.pr-merge-mismatch").unwrap_or_else(|| panic!("{err}\n{:#?}", rules(&v)));
+    assert_eq!(m["severity"], "critical");
+    assert!(m["details"].to_string().contains(&real[..9]), "{m:#}");
+}
+
+#[test]
+fn hidden_repository_on_graphql_is_not_a_missing_pr() {
+    let (f, _, forged) = incident_without_local_memory();
+    let (base, tip, _, cleanup) = incident_range(&f);
+    let gh = fx::fake_github(vec![
+        viewer("victim"),
+        activity(&[]),
+        compare_route(
+            &base,
+            &tip,
+            fx::compare_json(&[(&forged, false, "unsigned", None), (&cleanup, false, "unsigned", None)]),
+        ),
+        graphql_route(r#"{"data":{"repository":null}}"#.into()),
+    ]);
+    let (_, v, err) = github(&f, &gh, &[]);
+    assert!(finding(&v, "t11.pr-merge-mismatch").is_none(), "{err}\n{:#?}", rules(&v));
+    assert!(err.contains("pull requests not checked"), "{err}");
+}
+
+#[test]
+fn scan_of_a_range_off_a_ref_uses_the_branch_push_history() {
+    let (f, real, forged) = incident_without_local_memory();
+    let (base, _, _, _) = incident_range(&f);
+    let gh = fx::fake_github(vec![
+        viewer("victim"),
+        activity(&[fx::force_push_json(&real, &forged, "mallory", "2026-08-01T10:00:00Z")]),
+        compare_route(&base, &forged, fx::compare_json(&[(&forged, false, "unsigned", None)])),
+        graphql_route(fx::graphql_pulls_json(&[(2921, Some(&real))])),
+    ]);
+    let range = format!("{base}..{forged}");
+    for extra in [&[][..], &["--github-branch", "dev"][..]] {
+        let out = shield(&f)
+            .env("GIT_SHIELD_GITHUB_API", &gh.url)
+            .env("GITHUB_TOKEN", "test-token")
+            .args(["scan", &range, "--github", "--json", "--github-repo", "o/r"])
+            .args(extra)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+        assert_eq!(out.status.code(), Some(2), "{err}\n{:#?}", rules(&v));
+        let m = finding(&v, "t11.pr-merge-mismatch").unwrap_or_else(|| panic!("{err}\n{:#?}", rules(&v)));
+        assert!(m["details"].to_string().contains("Arrived in a force-push by @mallory"), "{extra:?} {m:#}");
+    }
+    // Without a default branch to go by, no branch is guessed (a feature branch
+    // containing everything would claim every commit): a hint instead.
+    fx::git(&f.local, &fx::home(&f), &["remote", "set-head", "origin", "-d"]);
+    let out = shield(&f)
+        .env("GIT_SHIELD_GITHUB_API", &gh.url)
+        .env("GITHUB_TOKEN", "test-token")
+        .args(["scan", &range, "--github", "--json", "--github-repo", "o/r"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+    assert!(err.contains("--github-branch"), "{err}");
+    let m = finding(&v, "t11.pr-merge-mismatch").unwrap_or_else(|| panic!("{err}\n{:#?}", rules(&v)));
+    assert!(!m["details"].to_string().contains("Arrived in"), "{m:#}");
+}
+
+fn clone_cmd(f: &Fixture, gh: &fx::FakeGitHub, dest: &std::path::Path, extra: &[&str]) -> (i32, Value, String) {
+    let out = shield(f)
+        .env("GIT_SHIELD_GITHUB_API", &gh.url)
+        .env("GITHUB_TOKEN", "test-token")
+        .args(["clone", f.origin.to_str().unwrap()])
+        .arg(dest)
+        .args(["--branch", "dev", "--json", "--github-repo", "o/r"])
+        .args(extra)
+        .output()
+        .unwrap();
+    let v = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+    (out.status.code().unwrap_or(-1), v, String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+#[test]
+fn clone_checks_forged_merges_in_history() {
+    let (f, real, _) = incident_without_local_memory();
+    let gh = fx::fake_github(vec![graphql_route(fx::graphql_pulls_json(&[(2921, Some(&real))]))]);
+    let dest = f.dir.path().join("fresh");
+    let (code, v, err) = clone_cmd(&f, &gh, &dest, &[]);
+    assert_eq!(code, 2, "{err}\n{:#?}", rules(&v));
+    let m = finding(&v, "t11.pr-merge-mismatch").unwrap_or_else(|| panic!("{err}\n{:#?}", rules(&v)));
+    assert_eq!(m["severity"], "critical");
+    // Blocked: nothing but .git was written.
+    let names: Vec<_> = std::fs::read_dir(&dest).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, [std::ffi::OsString::from(".git")]);
+    assert!(!f.marker_exists());
+
+    let dest2 = f.dir.path().join("offline");
+    let before = gh.hits.load(std::sync::atomic::Ordering::SeqCst);
+    let (_, v, err) = clone_cmd(&f, &gh, &dest2, &["--no-github"]);
+    assert!(finding(&v, "t11.pr-merge-mismatch").is_none(), "{err}");
+    assert_eq!(gh.hits.load(std::sync::atomic::Ordering::SeqCst), before);
+}
+
+#[test]
+fn clone_does_not_apply_required_signing_to_history() {
+    let (f, real, _) = incident_without_local_memory();
+    let gh = fx::fake_github(vec![graphql_route(fx::graphql_pulls_json(&[(2921, Some(&real))]))]);
+    let cfg = f.dir.path().join("config.toml");
+    std::fs::write(&cfg, "[[signing]]\nrepo = \"*\"\nrequire = true\n").unwrap();
+    let out = shield(&f)
+        .env("GIT_SHIELD_CONFIG", &cfg)
+        .env("GIT_SHIELD_GITHUB_API", &gh.url)
+        .env("GITHUB_TOKEN", "test-token")
+        .args(["clone", f.origin.to_str().unwrap()])
+        .arg(f.dir.path().join("fresh"))
+        .args(["--branch", "dev", "--json", "--github-repo", "o/r"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+    assert!(finding(&v, "t11.unsigned-required").is_none(), "{err}\n{:#?}", rules(&v));
+    assert!(err.contains("require is not applied to existing history"), "{err}");
+}
+
+#[test]
+fn checkout_checks_forged_merges_it_brings_in() {
+    let (f, real, _) = incident_without_local_memory();
+    let gh = fx::fake_github(vec![graphql_route(fx::graphql_pulls_json(&[(2921, Some(&real))]))]);
+    let out = shield(&f)
+        .env("GIT_SHIELD_GITHUB_API", &gh.url)
+        .env("GITHUB_TOKEN", "test-token")
+        .args(["checkout", "origin/dev", "--json", "--github-repo", "o/r"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+    assert_eq!(out.status.code(), Some(2), "{err}\n{:#?}", rules(&v));
+    assert!(finding(&v, "t11.pr-merge-mismatch").is_some(), "{err}\n{:#?}", rules(&v));
+    assert!(!f.marker_exists());
+}
