@@ -89,7 +89,7 @@
 - Warm forensic scans with `--github` spend most of their time on the network: the activity log, and open or unknown PR states, which can change and so are not cached. The offline part is now ~0.75 s for 1,110 commits (was 1.3 s).
 - The matador-legacy real-data run found five more forged "Merge pull request" commits still in `dev`. Details went to the user only; nothing was changed in that repo.
 - Content rules see added lines and changed entries per file version. A payload split across two files or two commits only correlates via `t13.payload-wired` (refs) or `t10.tampered-payload`. More correlation is research, not scheduled.
-- ~~`t9.workflow.remote-exec` noise on installer steps~~ Session 9: sourced installer allowlist (`data/installers.toml`); such steps are Low. The FP rerun (9 of the 10 repos; the claude-code shallow clone is missing an object) had no installer steps in its 300-commit windows. What it did surface is the "interpreter on a non-script file" check matching `python -m pip install -r requirements.txt`, `node -p "require('…/package.json')"` and prose in AGENTS.md. That check now requires the file to be the script argument. Result: Medium 15 → 2 across the repos, 0 High/Critical; a few of those files fall back to `path.sensitive` Low.
+- ~~`t9.workflow.remote-exec` noise on installer steps~~ Session 9: sourced installer allowlist (`data/installers.toml`); such steps are Low. The FP rerun (9 of the 10 repos; the claude-code shallow clone is missing an object) had no installer steps in its 300-commit windows. What it did surface is the "interpreter on a non-script file" check matching `python -m pip install -r requirements.txt`, `node -p "require('…/package.json')"` and prose in AGENTS.md. That check now requires the file to be the script argument. Result: Medium 13 → 1 across the repos, 0 High/Critical; a few of those files fall back to `path.sensitive` Low.
 - The signature list is small on purpose. Grow it only with sourced entries.
 - The `install` shell function only covers interactive shells. IDE pull buttons and scripts bypass it; the CI action (ADR 0008) covers those pushes on GitHub.
 - ~~`audit` slow on large trees~~ Session 9: files are read in parallel after the walk; matador-legacy's 3,100 files take 0.19 s warm (1.0 s cold). Untracked `media/` test placeholders are Low (graded asset rule).
@@ -289,7 +289,7 @@
   - URL resolution and validation, plus safe names and paths (unit tests);
   - fixture tests for a clean submodule (`git submodule status` initialized) and a payload submodule (whole clone blocked, only `.git` written);
   - verified on a public repository with two https submodules.
-- Interpreter-on-asset (`util::runs_asset`): the asset must be the interpreter's script argument (`-m` means no script; `-c`/`-e`/`-p` code is checked recursively). FP run Medium 15 → 2.
+- Interpreter-on-asset (`util::runs_asset`): the asset must be the interpreter's script argument (`-m` means no script; `-c`/`-e`/`-p` code is checked recursively). FP run Medium 13 → 1.
 - Regression test: 10,000 `github-pr-owner-number` values read in 0.19 s.
 - **Real data (read-only):**
   - matador-legacy offline `scan HEAD~300..HEAD`: 1.2 s warm (0.75 s without signatures);
