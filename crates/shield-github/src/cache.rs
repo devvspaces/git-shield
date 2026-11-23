@@ -39,6 +39,10 @@ pub struct WebFlowVerdict {
     pub good: bool,
     /// Signer when good, reason when bad.
     pub detail: String,
+    /// For verdicts that are neither good nor bad: `nokey`, `expired` or
+    /// `revoked`. Empty otherwise (and in caches written before this field).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
 }
 
 /// Verification results that a later key upload or email change cannot flip.
@@ -57,7 +61,17 @@ pub fn dir() -> Option<PathBuf> {
 impl Cache {
     /// Load the cache for `owner/name`; empty if absent or corrupt.
     pub fn load(owner: &str, name: &str) -> Self {
-        let path = dir().map(|d| d.join(format!("{owner}__{name}.json")));
+        Self::load_at(dir().map(|d| d.join(format!("{owner}__{name}.json"))))
+    }
+
+    /// Cache for a repository without a GitHub session, identified by `id`
+    /// (a hash of its git directory): `…/git-shield/local/ID.json`. Only the
+    /// web-flow verdicts are used there.
+    pub fn load_local(id: &str) -> Self {
+        Self::load_at(dir().and_then(|d| d.parent().map(|p| p.join("local").join(format!("{id}.json")))))
+    }
+
+    fn load_at(path: Option<PathBuf>) -> Self {
         let mut c: Cache = path
             .as_ref()
             .and_then(|p| std::fs::read(p).ok())
@@ -169,7 +183,7 @@ mod tests {
 
         let mut back = back;
         back.set_keyring("k1");
-        back.put_webflow("a", WebFlowVerdict { good: true, detail: "GitHub".into() });
+        back.put_webflow("a", WebFlowVerdict { good: true, detail: "GitHub".into(), kind: String::new() });
         assert!(back.webflow("a").is_some());
         back.set_keyring("k1");
         assert!(back.webflow("a").is_some());

@@ -936,7 +936,11 @@ pub(crate) fn attest(
         note("[[signing]] require is not applied to existing history; it applies to what later pulls bring in");
     }
     let mut a = Attestations { require_signed: require && policy.require, ..Default::default() };
-    let mut cache = known.session.as_ref().map(|s| shield_github::cache::Cache::load(&s.owner, &s.name));
+    // Without GitHub, a per-repository cache still keeps the web-flow verdicts.
+    let mut cache = Some(match &known.session {
+        Some(s) => shield_github::cache::Cache::load(&s.owner, &s.name),
+        None => shield_github::cache::Cache::load_local(&local_cache_id(repo)),
+    });
     if let Some(c) = &mut cache {
         c.set_keyring(&shield_git::signing::keyring_id());
     }
@@ -953,6 +957,17 @@ pub(crate) fn attest(
         c.save();
     }
     Ok(Some(a))
+}
+
+/// Stable id for a repository's local cache: FNV-1a of its canonical git dir.
+fn local_cache_id(repo: &GitRepo) -> String {
+    let dir = repo.common_dir().canonicalize().unwrap_or_else(|_| repo.common_dir().to_path_buf());
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in dir.to_string_lossy().bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
 }
 
 fn verify_local(
@@ -979,8 +994,13 @@ fn verify_local(
         if web_flow(c)
             && let Some(v) = cache.as_deref().and_then(|k| k.webflow(&c.id))
         {
-            let status =
-                if v.good { SigStatus::Good { signer: v.detail.clone() } } else { SigStatus::Bad(v.detail.clone()) };
+            let status = match (v.good, v.kind.as_str()) {
+                (true, _) => SigStatus::Good { signer: v.detail.clone() },
+                (false, "nokey") => SigStatus::NoKey,
+                (false, "expired") => SigStatus::Expired,
+                (false, "revoked") => SigStatus::Revoked,
+                (false, _) => SigStatus::Bad(v.detail.clone()),
+            };
             a.local.insert(c.id.clone(), SigCheck { format: SigFormat::Gpg, status, web_flow: true });
         } else {
             todo.push(c);
@@ -1011,10 +1031,20 @@ fn verify_local(
             && check.format == SigFormat::Gpg
             && let Some(k) = cache.as_deref_mut()
         {
+            // Every gpgv verdict against the fixed keyring is final; only
+            // "could not check" is not.
+            let verdict = |good: bool, detail: &str, kind: &str| WebFlowVerdict {
+                good,
+                detail: detail.to_string(),
+                kind: kind.to_string(),
+            };
             match &check.status {
-                SigStatus::Good { signer } => k.put_webflow(&id, WebFlowVerdict { good: true, detail: signer.clone() }),
-                SigStatus::Bad(why) => k.put_webflow(&id, WebFlowVerdict { good: false, detail: why.clone() }),
-                _ => {}
+                SigStatus::Good { signer } => k.put_webflow(&id, verdict(true, signer, "")),
+                SigStatus::Bad(why) => k.put_webflow(&id, verdict(false, why, "")),
+                SigStatus::NoKey => k.put_webflow(&id, verdict(false, "", "nokey")),
+                SigStatus::Expired => k.put_webflow(&id, verdict(false, "", "expired")),
+                SigStatus::Revoked => k.put_webflow(&id, verdict(false, "", "revoked")),
+                SigStatus::Intact | SigStatus::Unchecked(_) => {}
             }
         }
         a.local.insert(id, check);

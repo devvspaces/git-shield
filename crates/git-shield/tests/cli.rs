@@ -1478,3 +1478,76 @@ fn builds_without_yara_say_rules_are_unused() {
     let c = v.as_array().unwrap().iter().find(|c| c["area"] == "yara rules").expect("yara check");
     assert_eq!(c["status"], "warn");
 }
+
+#[test]
+fn offline_scans_reuse_web_flow_verdicts() {
+    let have = |p: &str| std::process::Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success());
+    if !have("gpgv") || !have("gpg") {
+        eprintln!("gpg/gpgv not installed; skipping");
+        return;
+    }
+    // A commit claiming GitHub as committer, really signed with a throwaway key:
+    // gpgv against the bundled web-flow keyring says NO_PUBKEY every time.
+    let f = fx::clean_fast_forward();
+    let home = fx::home(&f);
+    let gnupg = f.dir.path().join("gnupg");
+    std::fs::create_dir_all(&gnupg).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gnupg, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let keygen = std::process::Command::new("gpg")
+        .env("GNUPGHOME", &gnupg)
+        .args([
+            "--batch",
+            "--passphrase",
+            "",
+            "--quick-gen-key",
+            "Not GitHub <noreply@github.com>",
+            "ed25519",
+            "sign",
+            "never",
+        ])
+        .output()
+        .unwrap();
+    assert!(keygen.status.success(), "{}", String::from_utf8_lossy(&keygen.stderr));
+    fx::write(&f.local, "notes.txt", "signed\n");
+    fx::git(&f.local, &home, &["add", "notes.txt"]);
+    let out = std::process::Command::new("git")
+        .current_dir(&f.local)
+        .env("HOME", &home)
+        .env("GNUPGHOME", &gnupg)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_COMMITTER_NAME", "GitHub")
+        .env("GIT_COMMITTER_EMAIL", "noreply@github.com")
+        .args(["-c", "user.name=A", "-c", "user.email=a@example.com", "-c", "user.signingkey=noreply@github.com"])
+        .args(["commit", "-q", "-S", "-m", "Signed by a stranger"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let signed = fx::git(&f.local, &home, &["rev-parse", "HEAD"]);
+
+    let run = |path: &std::ffi::OsStr| {
+        let out = shield(&f).env("PATH", path).args(["scan", "HEAD~1..HEAD", "--json"]).output().unwrap();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+        v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|x| x["commit"] == signed.as_str())
+            .map(|x| format!("{} {}", x["rule"], x["severity"]))
+            .collect::<Vec<_>>()
+    };
+    let first = run(&std::env::var_os("PATH").unwrap());
+    assert!(first.iter().any(|r| r.contains("t11.github-unverified")), "{first:?}");
+    let cache = home.join(".cache/git-shield/local");
+    let files: Vec<_> = std::fs::read_dir(&cache).unwrap().map(|e| e.unwrap().path()).collect();
+    assert_eq!(files.len(), 1);
+    let body = std::fs::read_to_string(&files[0]).unwrap();
+    assert!(body.contains(&signed) && body.contains("nokey"), "{body}");
+    // Without gpgv on PATH, the cached verdict gives the same findings.
+    let empty = f.dir.path().join("empty-bin");
+    std::fs::create_dir_all(&empty).unwrap();
+    assert_eq!(run(empty.as_os_str()), first);
+}
