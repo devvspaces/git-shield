@@ -10,6 +10,84 @@ pub(crate) static EXEC_ASSET: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
+const INTERPRETERS: &[&str] = &[
+    "node",
+    "nodejs",
+    "deno",
+    "bun",
+    "py",
+    "bash",
+    "sh",
+    "zsh",
+    "ruby",
+    "perl",
+    "php",
+    "pwsh",
+    "powershell",
+    "osascript",
+    "wscript",
+    "cscript",
+];
+const ASSET_EXTS: &[&str] = &[
+    "ttf", "otf", "woff", "woff2", "eot", "svg", "png", "jpg", "jpeg", "gif", "ico", "webp", "bmp", "css", "scss",
+    "txt", "md", "json", "lock", "map", "mp3", "mp4", "wav", "pdf", "csv", "log", "dat", "bin",
+];
+
+fn is_interpreter(token: &str) -> bool {
+    let name = token.rsplit(['/', '\\']).next().unwrap_or(token).to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    INTERPRETERS.contains(&name)
+        || name.strip_prefix("python").is_some_and(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'))
+}
+
+/// True when an interpreter's *script argument* is a non-script file
+/// (`node ./public/fonts/x.ttf`). Module mode (`python -m pip install -r
+/// requirements.txt`) has no script; inline code (`-c`, `-e`, `-p`) is
+/// checked as a command of its own.
+pub(crate) fn runs_asset(cmd: &str) -> bool {
+    if !EXEC_ASSET.is_match(cmd) {
+        return false; // cheap prefilter
+    }
+    fn check(cmd: &str, depth: usize) -> bool {
+        for segment in cmd.split(['|', ';', '&', '\n']) {
+            let tokens: Vec<&str> = segment
+                .split_whitespace()
+                .map(|t| t.trim_matches(|c: char| "'\"`()".contains(c)))
+                .filter(|t| !t.is_empty())
+                .collect();
+            let mut i = 0;
+            while i < tokens.len() {
+                if !is_interpreter(tokens[i]) {
+                    i += 1;
+                    continue;
+                }
+                let mut j = i + 1;
+                while j < tokens.len() && tokens[j].starts_with('-') {
+                    let flag = tokens[j].trim_start_matches('-');
+                    if flag == "m" || flag.starts_with("m=") {
+                        break; // module mode: no script file
+                    }
+                    if matches!(flag, "c" | "e" | "p" | "eval" | "print" | "command") {
+                        // Inline code: look inside it, once.
+                        return depth < 2 && check(&tokens[j + 1..].join(" "), depth + 1);
+                    }
+                    j += 1;
+                }
+                if j < tokens.len() && !tokens[j].starts_with('-') {
+                    let script = tokens[j];
+                    let ext = script.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+                    if ASSET_EXTS.contains(&ext.as_str()) {
+                        return true;
+                    }
+                }
+                i = j.max(i + 1);
+            }
+        }
+        false
+    }
+    check(cmd, 0)
+}
+
 /// Download-and-execute or encoded execution.
 pub(crate) static REMOTE_EXEC: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -22,7 +100,7 @@ pub(crate) static REMOTE_EXEC: LazyLock<Regex> = LazyLock::new(|| {
 pub(crate) fn danger(cmd: &str) -> Option<&'static str> {
     if REMOTE_EXEC.is_match(cmd) {
         Some("downloads or decodes code to execute")
-    } else if EXEC_ASSET.is_match(cmd) {
+    } else if runs_asset(cmd) {
         Some("runs an interpreter on a non-script file (disguised payload)")
     } else {
         None
@@ -149,6 +227,21 @@ mod tests {
     #[test]
     fn refs_and_entries() {
         assert_eq!(refs_in("node ./public/fonts/x.ttf --flag"), ["public/fonts/x.ttf"]);
+    }
+
+    #[test]
+    fn interpreter_on_asset() {
+        assert!(runs_asset("node ./public/fonts/fa-solid-600.ttf"));
+        assert!(runs_asset("cd app && node --no-warnings public/x.woff2 --serve"));
+        assert!(runs_asset("python3 assets/logo.png"));
+        assert!(runs_asset("bash -c 'node ./public/fonts/x.ttf'"));
+        assert!(runs_asset("C:\\nodejs\\node.exe .\\fonts\\a.ttf"));
+        // Not a script argument.
+        assert!(!runs_asset("python -m pip install -r requirements.txt"));
+        assert!(!runs_asset("python -m pip install -r docs/requirements.txt -e ."));
+        assert!(!runs_asset(r#"echo "v=$(node -p "require('@playwright/test/package.json').version")""#));
+        assert!(!runs_asset("node scripts/build.js --config tsconfig.json"));
+        assert!(!runs_asset("python manage.py loaddata fixtures.json"));
         assert_eq!(refs_in("bash .claude/hook.sh && curl https://x.example/a.sh"), [".claude/hook.sh"]);
         assert!(refs_in("npm run build").is_empty());
         let e = |k: &str, c: &str| ExecEntry { key: k.into(), command: c.into() };

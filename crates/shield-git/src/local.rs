@@ -141,3 +141,40 @@ fn is_executable(meta: &std::fs::Metadata) -> bool {
 fn is_executable(_meta: &std::fs::Metadata) -> bool {
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// VS Code's GitHub extension writes thousands of `github-pr-owner-number`
+    /// values into `.git/config`; reading them was once quadratic.
+    #[test]
+    fn thousands_of_config_values_read_fast() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(dir.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let cfg = dir.path().join(".git/config");
+        let mut text = std::fs::read_to_string(&cfg).unwrap();
+        for i in 0..5000 {
+            text.push_str(&format!("[branch \"pr-{i}\"]\n\tgithub-pr-owner-number = \"acme#app#{i}\"\n"));
+        }
+        text.push_str("[vscode]\n");
+        for i in 0..5000 {
+            text.push_str(&format!("\tgithub-pr-owner-number = \"acme#app#{i}\"\n"));
+        }
+        std::fs::write(&cfg, text).unwrap();
+        let repo = GitRepo::discover(dir.path()).unwrap();
+        let start = std::time::Instant::now();
+        let state = read_local_state(&repo).unwrap();
+        let took = start.elapsed();
+        assert!(state.config.len() >= 10_000, "{}", state.config.len());
+        assert!(took < std::time::Duration::from_secs(2), "took {took:?}");
+    }
+}

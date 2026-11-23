@@ -1,6 +1,6 @@
 //! T1: auto-running editor tasks. T3: editor settings that enable execution.
 
-use crate::util::{EXEC_ASSET, REMOTE_EXEC, clip, parse_jsonc, refs_in, str_of};
+use crate::util::{REMOTE_EXEC, clip, parse_jsonc, refs_in, runs_asset, str_of};
 use serde_json::Value;
 use shield_core::{Detector, FileChange, Finding, Severity, Threat};
 
@@ -94,7 +94,7 @@ fn analyse_task(task: &Value, index: usize, anchor: &str, out: &mut Vec<Finding>
         hidden.push("isBackground");
     }
 
-    let exec_asset = cmdlines.iter().find(|l| EXEC_ASSET.is_match(l));
+    let exec_asset = cmdlines.iter().find(|l| runs_asset(l));
     let remote_exec = cmdlines.iter().find(|l| REMOTE_EXEC.is_match(l));
     let decoy = crate::signatures::is_decoy_label(&label);
     let cmd_display = cmdlines.first().map(|c| clip(c, 160)).unwrap_or_else(|| "(no command)".into());
