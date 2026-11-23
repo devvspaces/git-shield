@@ -2,6 +2,7 @@ use crate::{Error, Result, git_err, local};
 use gix::bstr::ByteSlice;
 use gix::hash::ObjectId;
 use gix::objs::tree::EntryKind;
+use rayon::prelude::*;
 use shield_core::{BlobData, CommitInfo, FileChange, FileStatus, ScanContext};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -115,16 +116,29 @@ impl GitRepo {
             net.iter().filter_map(|c| c.new.map(|n| (c.path.clone(), n.0))).collect();
         let commits = self.commit_range(from, to)?;
 
-        // Per-commit diffs to find content that came and went.
-        let mut transited = Vec::new();
+        // Per-commit diffs to find content that came and went. The diffs run
+        // in parallel (one repository handle per thread); the filtering below
+        // stays in commit order so results and finding ids do not change.
+        let shared = self.repo.clone().into_sync();
+        let local = || {
+            let mut repo = shared.to_thread_local();
+            repo.object_cache_size_if_unset(32 * 1024 * 1024);
+            GitRepo { repo }
+        };
+        let diffs: Vec<Vec<RawChange>> = commits
+            .par_iter()
+            .map_init(local, |r, info| {
+                let cid = ObjectId::from_hex(info.id.as_bytes()).map_err(git_err)?;
+                let parent_tree = match info.parents.first() {
+                    Some(p) => Some(r.commit_tree(ObjectId::from_hex(p.as_bytes()).map_err(git_err)?)?),
+                    None => None,
+                };
+                r.diff_trees(parent_tree, Some(r.commit_tree(cid)?))
+            })
+            .collect::<Result<_>>()?;
+        let mut kept = Vec::new();
         let mut seen: HashSet<(String, ObjectId)> = HashSet::new();
-        for info in &commits {
-            let cid = ObjectId::from_hex(info.id.as_bytes()).map_err(git_err)?;
-            let parent_tree = match info.parents.first() {
-                Some(p) => Some(self.commit_tree(ObjectId::from_hex(p.as_bytes()).map_err(git_err)?)?),
-                None => None,
-            };
-            let changes = self.diff_trees(parent_tree, Some(self.commit_tree(cid)?))?;
+        for (info, changes) in commits.iter().zip(diffs) {
             for ch in changes {
                 let Some((new_oid, _)) = ch.new else { continue };
                 if tip_paths.get(&ch.path) == Some(&new_oid) {
@@ -138,10 +152,15 @@ impl GitRepo {
                 if self.tree_entry_oid(tip_tree, &ch.path)? == Some(new_oid) {
                     continue;
                 }
-                transited.push(self.materialize(ch, Some(info.id.clone()), true)?);
+                kept.push((ch, info.id.clone()));
             }
         }
-        let changes = net.into_iter().map(|ch| self.materialize(ch, None, false)).collect::<Result<Vec<_>>>()?;
+        let transited = kept
+            .into_par_iter()
+            .map_init(local, |r, (ch, id)| r.materialize(ch, Some(id), true))
+            .collect::<Result<Vec<_>>>()?;
+        let changes =
+            net.into_par_iter().map_init(local, |r, ch| r.materialize(ch, None, false)).collect::<Result<Vec<_>>>()?;
         Ok(ScanContext {
             label: label.into(),
             base: base.map(|b| b.to_string()),

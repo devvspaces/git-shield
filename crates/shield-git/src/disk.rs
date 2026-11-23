@@ -4,9 +4,10 @@
 
 use crate::repo::{BLOB_READ_LIMIT, BLOB_SCAN_CAP};
 use crate::{GitRepo, Result, local};
+use rayon::prelude::*;
 use shield_core::{BlobData, FileChange, FileStatus, ScanContext};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Directories not descended into (dependency caches and build output).
@@ -24,11 +25,16 @@ pub struct DiskScan {
 /// Scan every regular file and symlink under `root`. If `root` is inside a git
 /// repository, its local config and hooks are audited too (read-only).
 pub fn scan_dir(root: &Path, label: impl Into<String>) -> Result<DiskScan> {
-    let mut changes = Vec::new();
+    // Walk first (cheap, in sorted order), then read the files in parallel.
+    enum Item {
+        Link(String, PathBuf),
+        File(String, PathBuf, std::fs::Metadata),
+    }
+    let mut items = Vec::new();
     let mut skipped = Vec::new();
     let mut truncated = false;
     let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    'walk: while let Some(dir) = stack.pop() {
         let mut entries: Vec<_> = std::fs::read_dir(&dir)?.filter_map(|e| e.ok()).collect();
         entries.sort_by_key(|e| e.file_name());
         for e in entries {
@@ -44,28 +50,37 @@ pub fn scan_dir(root: &Path, label: impl Into<String>) -> Result<DiskScan> {
                 }
                 continue;
             }
-            if changes.len() >= MAX_FILES {
+            if items.len() >= MAX_FILES {
                 truncated = true;
-                break;
+                break 'walk;
             }
-            let blob = if ft.is_symlink() {
-                let target = std::fs::read_link(&path)?.to_string_lossy().into_owned().into_bytes();
-                blob_from(target, true, false)
+            if ft.is_symlink() {
+                items.push(Item::Link(rel, path));
             } else if ft.is_file() {
-                read_file(&path, &meta)?
-            } else {
-                continue;
+                items.push(Item::File(rel, path, meta));
+            }
+        }
+    }
+    let changes = items
+        .into_par_iter()
+        .map(|item| {
+            let (rel, blob) = match item {
+                Item::Link(rel, path) => {
+                    let target = std::fs::read_link(&path)?.to_string_lossy().into_owned().into_bytes();
+                    (rel, blob_from(target, true, false))
+                }
+                Item::File(rel, path, meta) => (rel, read_file(&path, &meta)?),
             };
-            changes.push(FileChange {
+            Ok(FileChange {
                 path: rel,
                 status: FileStatus::Added,
                 old: None,
                 new: Some(blob),
                 commit: None,
                 transited: false,
-            });
-        }
-    }
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let local = match GitRepo::discover(root) {
         Ok(repo) => Some(local::read_local_state(&repo)?),
         Err(_) => None,
