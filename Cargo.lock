@@ -1089,7 +1089,7 @@ dependencies = [
 
 [[package]]
 name = "git-shield"
-version = "0.0.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2823,7 +2823,7 @@ checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shield-bench"
-version = "0.0.1"
+version = "0.5.0"
 dependencies = [
  "criterion",
  "shield-core",
@@ -2835,7 +2835,7 @@ dependencies = [
 
 [[package]]
 name = "shield-core"
-version = "0.0.1"
+version = "0.5.0"
 dependencies = [
  "hex",
  "rayon",
@@ -2845,14 +2845,14 @@ dependencies = [
 
 [[package]]
 name = "shield-fixtures"
-version = "0.0.1"
+version = "0.5.0"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "shield-git"
-version = "0.0.1"
+version = "0.5.0"
 dependencies = [
  "gix",
  "hex",
@@ -2866,7 +2866,7 @@ dependencies = [
 
 [[package]]
 name = "shield-github"
-version = "0.0.1"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2876,7 +2876,7 @@ dependencies = [
 
 [[package]]
 name = "shield-report"
-version = "0.0.1"
+version = "0.5.0"
 dependencies = [
  "owo-colors",
  "serde_json",
@@ -2885,7 +2885,7 @@ dependencies = [
 
 [[package]]
 name = "shield-rules"
-version = "0.0.1"
+version = "0.5.0"
 dependencies = [
  "aho-corasick",
  "infer",
