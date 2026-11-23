@@ -211,6 +211,61 @@ fn poisoned_local_config_refuses_to_run_git() {
     assert!(!f.marker_exists(), "fsmonitor ran!");
 }
 
+fn add_to_config(f: &Fixture, text: &str) {
+    let cfg = f.local.join(".git/config");
+    let mut body = std::fs::read_to_string(&cfg).unwrap();
+    body.push_str(text);
+    std::fs::write(&cfg, body).unwrap();
+}
+
+#[test]
+fn settings_in_an_included_config_file_are_checked() {
+    let f = fx::clean_fast_forward();
+    // `git` would apply this include; the dangerous key lives only in the included file.
+    std::fs::write(f.local.join(".git/extra.cfg"), format!("[core]\n\tsshCommand = touch {}\n", f.marker.display()))
+        .unwrap();
+    add_to_config(&f, "[include]\n\tpath = extra.cfg\n");
+    let out = shield(&f).args(["check"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", String::from_utf8_lossy(&out.stderr));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("refusing to run git"), "{err}");
+    assert!(err.contains("extra.cfg"), "{err}");
+    assert!(!f.marker_exists());
+}
+
+#[test]
+fn include_if_cycles_and_fifos_are_handled() {
+    let f = fx::clean_fast_forward();
+    let git = f.local.join(".git");
+    // includeIf (condition assumed true) → a.cfg → b.cfg → a.cfg (cycle).
+    std::fs::write(git.join("a.cfg"), "[include]\n\tpath = b.cfg\n").unwrap();
+    std::fs::write(
+        git.join("b.cfg"),
+        format!("[include]\n\tpath = a.cfg\n[core]\n\tfsmonitor = touch {}\n", f.marker.display()),
+    )
+    .unwrap();
+    add_to_config(&f, "[includeIf \"gitdir:/nowhere/\"]\n\tpath = a.cfg\n");
+    #[cfg(unix)]
+    {
+        let fifo = git.join("fifo.cfg");
+        let ok = std::process::Command::new("mkfifo").arg(&fifo).status().map(|s| s.success()).unwrap_or(false);
+        if ok {
+            add_to_config(&f, "[include]\n\tpath = fifo.cfg\n");
+        }
+    }
+    let out = shield(&f).args(["scan", "HEAD~0..HEAD", "--json"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let hit = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["rule"] == "git.local-config" && x["title"].as_str().unwrap().contains("core.fsmonitor"))
+        .unwrap_or_else(|| panic!("{:#?}", rules(&v)));
+    assert_eq!(hit["severity"], "critical");
+    assert!(hit["path"].as_str().unwrap().ends_with("b.cfg"), "{hit:#}");
+    assert!(!f.marker_exists());
+}
+
 #[test]
 fn hardened_fetch_neutralises_fsmonitor_when_overridden() {
     let f = fx::clean_fast_forward();

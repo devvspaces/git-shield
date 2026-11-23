@@ -85,12 +85,15 @@ pub struct CommitInfo {
 }
 
 /// A key/value from the repository-local git config (`.git/config`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ConfigEntry {
     /// Fully qualified, lower-cased section/name, e.g. `core.fsmonitor`,
     /// `filter.lfs.smudge` (subsection keeps its case).
     pub key: String,
     pub value: String,
+    /// The included file this entry was read from (`None` for `.git/config`
+    /// and `config.worktree` themselves).
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone)]

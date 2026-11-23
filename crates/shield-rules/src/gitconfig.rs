@@ -34,8 +34,8 @@ const RULES: &[(&str, Severity, &str)] = &[
     ("remote.*.receivepack", Severity::High, "runs instead of git-receive-pack on push"),
     ("credential.helper", Severity::Medium, "runs when git needs credentials"),
     ("credential.*.helper", Severity::Medium, "runs when git needs credentials"),
-    ("include.path", Severity::Medium, "pulls in config from another file (not followed by git-shield)"),
-    ("includeif.*.path", Severity::Medium, "pulls in config from another file (not followed by git-shield)"),
+    ("include.path", Severity::Medium, "pulls in config from another file (git-shield checks its settings too)"),
+    ("includeif.*.path", Severity::Medium, "pulls in config from another file (git-shield checks its settings too)"),
     ("protocol.ext.allow", Severity::High, "allows ext:: transport, which runs arbitrary commands"),
     ("alias.*", Severity::Medium, "shell alias"),
 ];
@@ -86,10 +86,13 @@ impl Detector for LocalConfig {
             }
             let mut f =
                 Finding::new(Threat::T7, "git.local-config", *sev, format!("Local git config sets `{}`", entry.key))
-                    .path(cfg_path.clone())
+                    .path(entry.source.clone().unwrap_or_else(|| cfg_path.clone()))
                     .anchor(format!("{}={}", entry.key, entry.value))
                     .detail(format!("{} = {}", entry.key, crate::util::clip(&entry.value, 160)))
                     .detail(format!("Effect: {why}."));
+            if let Some(src) = &entry.source {
+                f = f.detail(format!("Set in `{src}`, included from the repository's git config: git applies it."));
+            }
             if key_lower == "core.hookspath" && !entry.value.starts_with('/') && !entry.value.starts_with('~') {
                 f = f.detail("Relative hooksPath means hooks come from tracked files in the repo (e.g. husky). Every pull can change them.");
             }
@@ -131,7 +134,10 @@ mod tests {
         ScanContext {
             local: Some(LocalRepoState {
                 config_path: None,
-                config: cfg.iter().map(|(k, v)| ConfigEntry { key: (*k).into(), value: (*v).into() }).collect(),
+                config: cfg
+                    .iter()
+                    .map(|(k, v)| ConfigEntry { key: (*k).into(), value: (*v).into(), source: None })
+                    .collect(),
                 hooks: hooks.iter().map(|(n, x)| HookFile { name: (*n).into(), executable: *x, size: 10 }).collect(),
             }),
             ..Default::default()
