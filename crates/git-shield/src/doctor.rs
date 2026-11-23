@@ -165,12 +165,51 @@ fn agent_checks(home: &Path, out: &mut Vec<Check>) {
     }
 }
 
+/// The user's YARA rules directory: found, compiled, usable by this build.
+fn rule_checks(out: &mut Vec<Check>) {
+    let Some(dir) = shield_rules::rules_dir() else { return };
+    let files = match shield_rules::rule_files(&dir) {
+        Ok(f) => f,
+        Err(e) => return out.push(check("yara rules", Status::Warn, e, None)),
+    };
+    if files.is_empty() {
+        let what = if shield_rules::YARA { "none" } else { "none (this build has no YARA support)" };
+        return out.push(check(
+            "yara rules",
+            Status::Info,
+            format!("{what}; add *.yar files to {}", dir.display()),
+            None,
+        ));
+    }
+    #[cfg(not(feature = "yara"))]
+    out.push(check(
+        "yara rules",
+        Status::Warn,
+        format!("{} rule file(s) in {}, but this build has no YARA support", files.len(), dir.display()),
+        Some("rebuild with the default features (`cargo install --path crates/git-shield`)"),
+    ));
+    #[cfg(feature = "yara")]
+    match shield_rules::yara::compile_dir(&dir) {
+        Ok(Some(d)) => out.push(check(
+            "yara rules",
+            Status::Ok,
+            format!("{} rule(s) from {} file(s) in {}", d.rule_count(), d.files().len(), dir.display()),
+            None,
+        )),
+        Ok(None) => {}
+        Err(e) => {
+            out.push(check("yara rules", Status::Warn, e, Some("fix the rule; scans refuse to run until it compiles")))
+        }
+    }
+}
+
 pub fn run(json: bool) -> Result<u8> {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let mut checks = Vec::new();
     git_checks(&mut checks);
     editor_checks(&home, &mut checks);
     agent_checks(&home, &mut checks);
+    rule_checks(&mut checks);
     let warn = checks.iter().any(|c| c.status == Status::Warn);
     if json {
         println!("{}", serde_json::to_string_pretty(&checks)?);

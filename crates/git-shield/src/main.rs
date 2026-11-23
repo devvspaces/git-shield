@@ -300,6 +300,17 @@ fn now() -> i64 {
 }
 
 fn run(cli: Cli) -> Result<u8> {
+    let scans = !matches!(
+        cli.command,
+        Command::Doctor { .. }
+            | Command::Trust { .. }
+            | Command::Config { .. }
+            | Command::Install { .. }
+            | Command::Uninstall { .. }
+    );
+    if scans {
+        load_detectors()?;
+    }
     match cli.command {
         Command::Scan { range, previous_tip, github, github_branch, deep, common } => {
             let repo = GitRepo::discover(&common.repo)?;
@@ -1285,8 +1296,33 @@ fn history_branch(repo: &GitRepo, to: ObjectId, given: Option<&str>, common: &Co
     }
 }
 
+static DETECTORS: std::sync::OnceLock<Vec<Box<dyn shield_core::Detector>>> = std::sync::OnceLock::new();
+
+/// Built-in detectors plus the user's YARA rules (ADR 0009). A rule that does
+/// not compile stops the run: silently skipping it would hide that it is off.
+fn load_detectors() -> Result<()> {
+    let dir = shield_rules::rules_dir();
+    #[cfg_attr(not(feature = "yara"), allow(unused_mut))]
+    let mut extra: Vec<Box<dyn shield_core::Detector>> = Vec::new();
+    if let Some(dir) = &dir {
+        #[cfg(feature = "yara")]
+        if let Some(d) = shield_rules::yara::compile_dir(dir).map_err(anyhow::Error::msg)? {
+            extra.push(Box::new(d));
+        }
+        #[cfg(not(feature = "yara"))]
+        {
+            let n = shield_rules::rule_files(dir).map_err(anyhow::Error::msg)?.len();
+            if n > 0 {
+                note(&format!("this build has no YARA support; {n} rule file(s) in {} are not used", dir.display()));
+            }
+        }
+    }
+    let _ = DETECTORS.set(shield_rules::builtin_with(extra));
+    Ok(())
+}
+
 fn scan(ctx: &ScanContext) -> Report {
-    shield_core::run(&shield_rules::builtin(), ctx)
+    shield_core::run(DETECTORS.get_or_init(shield_rules::builtin), ctx)
 }
 
 /// Config keys the hardened runner already overrides on the command line.

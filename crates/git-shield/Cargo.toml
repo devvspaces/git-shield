@@ -13,6 +13,10 @@ categories = ["command-line-utilities", "development-tools"]
 name = "git-shield"
 path = "src/main.rs"
 
+[features]
+default = ["yara"]
+yara = ["shield-rules/yara"]
+
 [dependencies]
 shield-core = { workspace = true }
 shield-git = { workspace = true }

@@ -35,6 +35,8 @@ sha2 = "0.11.1"
 hex = "0.4.3"
 yaml-rust2 = "0.13.0"
 ureq = { version = "=3.5.0", default-features = false, features = ["rustls"] }
+# Only the light modules: no PE/ELF/Mach-O parsers (and their crypto stack).
+yara-x = { version = "=1.23.0", default-features = false, features = ["constant-folding", "exact-atoms", "fast-regexp", "hash-module", "math-module", "string-module", "time-module"] }
 
 # dev
 assert_cmd = "2.2.2"

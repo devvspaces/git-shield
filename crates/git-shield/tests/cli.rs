@@ -15,6 +15,8 @@ fn shield(f: &Fixture) -> Command {
         .env("GIT_SHIELD_HOME", shield_home(f))
         // Never pick up the developer's real allowlist.
         .env("GIT_SHIELD_CONFIG", f.dir.path().join("no-config.toml"))
+        // … nor their YARA rules.
+        .env("GIT_SHIELD_RULES", f.dir.path().join("no-rules"))
         .env_remove("XDG_DATA_HOME")
         .env_remove("XDG_CACHE_HOME")
         // When these tests run inside GitHub Actions, never pick up the run's own event.
@@ -1336,4 +1338,88 @@ fn ci_reads_the_force_push_log_with_an_installation_token() {
     let rules = sarif_rules(&r.sarif);
     assert!(rules.contains(&"t10.ref-rewritten".to_string()), "{rules:?}\n{}", r.stderr);
     assert!(r.stdout.contains("@mallory"), "{}", r.stdout);
+}
+
+// ---------------------------------------------------------------- user YARA rules
+
+fn rules_dir(f: &Fixture, rules: &[(&str, &str)]) -> std::path::PathBuf {
+    let dir = f.dir.path().join("rules");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, text) in rules {
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+    dir
+}
+
+const PAYLOAD_RULE: &str = r#"
+rule fake_font_loader {
+  meta:
+    description = "Font file that loads code"
+    severity = "critical"
+    threat = "T2"
+  strings:
+    $req = "writeFileSync(marker"
+  condition:
+    $req
+}
+"#;
+
+#[cfg(feature = "yara")]
+#[test]
+fn user_yara_rules_scan_incoming_files() {
+    let f = fx::matador_incident();
+    fx::git(&f.local, &fx::home(&f), &["fetch", "-q", "origin"]);
+    let dir = rules_dir(&f, &[("payload.yar", PAYLOAD_RULE)]);
+    let out = shield(&f).env("GIT_SHIELD_RULES", &dir).args(["scan", "HEAD..origin/dev", "--json"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let m = finding(&v, "yara.fake_font_loader")
+        .unwrap_or_else(|| panic!("{}\n{:#?}", String::from_utf8_lossy(&out.stderr), rules(&v)));
+    assert_eq!(m["severity"], "critical");
+    assert_eq!(m["threat"], "T2");
+    assert_eq!(m["path"], "public/fonts/fa-solid-600.ttf");
+    assert!(m["id"].as_str().unwrap().starts_with("GS-T2-"));
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!f.marker_exists());
+}
+
+#[cfg(feature = "yara")]
+#[test]
+fn a_broken_yara_rule_stops_the_scan() {
+    let f = fx::clean_fast_forward();
+    let dir = rules_dir(&f, &[("bad.yar", "rule bad { condition: $nope }")]);
+    let out = shield(&f).env("GIT_SHIELD_RULES", &dir).args(["scan", "HEAD~0..HEAD"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("bad.yar"), "{err}");
+    // doctor reports it instead of failing.
+    let out = shield(&f).env("GIT_SHIELD_RULES", &dir).args(["doctor", "--json"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let c = v.as_array().unwrap().iter().find(|c| c["area"] == "yara rules").expect("yara check");
+    assert_eq!(c["status"], "warn");
+}
+
+#[cfg(feature = "yara")]
+#[test]
+fn doctor_counts_yara_rules() {
+    let f = fx::clean_fast_forward();
+    let dir = rules_dir(&f, &[("payload.yar", PAYLOAD_RULE)]);
+    let out = shield(&f).env("GIT_SHIELD_RULES", &dir).args(["doctor", "--json"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let c = v.as_array().unwrap().iter().find(|c| c["area"] == "yara rules").expect("yara check");
+    assert_eq!(c["status"], "ok");
+    assert!(c["message"].as_str().unwrap().starts_with("1 rule(s) from 1 file(s)"), "{c}");
+}
+
+#[cfg(not(feature = "yara"))]
+#[test]
+fn builds_without_yara_say_rules_are_unused() {
+    let f = fx::clean_fast_forward();
+    let dir = rules_dir(&f, &[("payload.yar", PAYLOAD_RULE)]);
+    let out = shield(&f).env("GIT_SHIELD_RULES", &dir).args(["scan", "HEAD~0..HEAD"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no YARA support"));
+    let out = shield(&f).env("GIT_SHIELD_RULES", &dir).args(["doctor", "--json"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let c = v.as_array().unwrap().iter().find(|c| c["area"] == "yara rules").expect("yara check");
+    assert_eq!(c["status"], "warn");
 }

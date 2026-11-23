@@ -16,6 +16,12 @@ toml = { workspace = true }
 yaml-rust2 = { workspace = true }
 aho-corasick = { workspace = true }
 infer = { workspace = true }
+yara-x = { workspace = true, optional = true }
+
+[features]
+default = []
+# User YARA content rules (ADR 0009).
+yara = ["dep:yara-x"]
 
 [lints]
 workspace = true
