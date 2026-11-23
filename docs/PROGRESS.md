@@ -7,11 +7,11 @@
 
 | | |
 |---|---|
-| **Phase** | 0–5 done → next: Phase 6 (yara-x rules, SARIF, `--ci`, GitHub Action, benchmarks) |
-| **Last completed** | Session 7: lifted the Phase 4 limits: GraphQL batches, budgets and `scan --deep`, `--github-branch`, signature and PR checks on `clone`/`checkout` (ADR 0007 addendum). 132 tests green |
-| **Next task** | Phase 6, when the user asks |
+| **Phase** | 0–6 done → next: Phase 7 (cargo-dist releases, Homebrew, signed artifacts) |
+| **Last completed** | Session 8: Phase 6: SARIF, `git shield ci` and the GitHub Action (ADR 0008), user YARA rules behind the default-on `yara` feature (ADR 0009), `shield-bench`. 153 tests green (148 without `yara`) |
+| **Next task** | Phase 7, when the user asks |
 | **Blockers** | None |
-| **Perf** | Warm, release build, matador-legacy: `scan af20233d8..d9351023d` (20 commits, 58 file versions) **~30 ms**; `scan HEAD..origin/dev` with provenance **~20–90 ms** (target < 300 ms); GitHub lookup adds **~1–2 s** of network; local signature checks ~3 ms per signed commit (parallel), web-flow verdicts cached; forensic `scan --github` of 1,110 commits **cold ~8 s, warm ~4 s** with full coverage |
+| **Perf** | Warm, release build, matador-legacy: `scan af20233d8..d9351023d` (20 commits, 58 file versions) **~30 ms**; `scan HEAD..origin/dev` with provenance **~20–90 ms** (target < 300 ms); GitHub lookup adds **~1–2 s** of network; local signature checks ~3 ms per signed commit (parallel), web-flow verdicts cached; forensic `scan --github` of 1,110 commits **cold ~8 s, warm ~4 s** with full coverage; offline `scan HEAD~300..HEAD` (1,113 commits) **3.2 s**, 1.5 s with `--no-verify-signatures`. `shield-bench` (synthetic 20 commits, ~30k lines): `scan_range` **11.7 ms**, detectors 4.9 ms, with 50 YARA rules 4.7 ms. Release binary 18.3 MB (7.9 MB without `yara`); clean release build 3 min (36 s without) |
 
 ## Phase checklist
 
@@ -65,7 +65,12 @@
 - [x] `install` / `uninstall`: shell function for `git pull` (ADR 0006; the reference-transaction hook was tested and rejected)
 - [x] Full GPG/SSH signature verification: done in the Phase 4 remainder (session 6)
 
-### Phase 6: yara-x rules, SARIF, GitHub Action, benchmarks (v0.5)
+### Phase 6: yara-x rules, SARIF, GitHub Action, benchmarks (v0.5) ✅
+- [x] SARIF 2.1.0 (`--sarif FILE` on every scanning command): security-severity, stable fingerprints, accepted → suppressions, placeholder location for commit findings
+- [x] `git shield ci`: ranges from push / pull_request events, forced push → previous tip, missing objects fetched by SHA, `--fail-on`, escaped annotations, job summary, `--accept-file` / `--accepts-path` (trusted side only) (ADR 0008)
+- [x] `action.yml` (composite, built from the action's source, SHA-pinned actions) + dogfood workflow; verified on this repository (push and a throwaway PR)
+- [x] User YARA rules via yara-x 1.23, feature `yara` on by default; metadata contract; hard error on bad rules; `doctor` status (ADR 0009)
+- [x] `crates/shield-bench` (criterion) + `scripts/bench-real.sh`; CI builds the benches and runs a `--no-default-features` job
 ### Phase 7: cargo-dist releases, Homebrew, signed artifacts (v1.0)
 
 ## Known gaps / ideas (not yet scheduled)
@@ -78,6 +83,9 @@
 - ~~`scan --github` off a remote-tracking ref skips the force-push log and pushers~~ Session 7: `--github-branch`, else a remote branch whose tip is the range end, else the default branch if it contains it. Feature branches are never guessed (their creation would claim every commit).
 - ~~GitHub checks cover 300 commits / 100 PRs~~ Session 7: GraphQL batches (100 per request). Defaults: 2000 signed commits, 1000 PRs; `--deep`: 5000 each. REST fallback (100) when GraphQL is unavailable.
 - ~~`clone`/`checkout` do not verify signatures~~ Session 7: they run the signature and PR rules over the history they bring in (clone: newest 50,000 commits; `require` is not applied to existing history).
+- Offline scans don't cache local signature verdicts: the web-flow cache is per GitHub repository and only loaded with a GitHub session. On 1,113 matador commits that is ~1.7 s of `gpgv`. A per-repository cache would close it.
+- The action builds git-shield from source (~1 min cold, cached later) until Phase 7 ships binaries. It builds without YARA: a runner has no user rules directory.
+- Commit-level findings use the placeholder path `.git-shield/commits/<sha>` in SARIF; code scanning shows it as a file that does not exist.
 - Warm forensic scans are ~4 s on 1,110 commits: ~1.3 s is the offline diff walk, the rest is the activity log and the uncached open/unknown PRs. Fine for forensics; `check`/`pull` ranges are small.
 - The matador-legacy real-data run found five more forged "Merge pull request" commits still in `dev`. Details went to the user only; nothing was changed in that repo.
 - Content rules see added lines and changed entries per file version. A payload split across two files or two commits only correlates via `t13.payload-wired` (refs) or `t10.tampered-payload`.
@@ -245,3 +253,20 @@
   - `clone` of matador (from the local path into a temp dir) BLOCKS on 9 forged merges in `dev`'s history and writes no files.
   - Unchanged: `scan HEAD..origin/dev` CLEAN; incident replay BLOCKS; `af20233d8..d9351023d` warns.
 - Tests: 132.
+
+### 2026-11-23: Session 8 (Phase 6)
+- `shield-report::ci`: SARIF 2.1.0, GitHub workflow annotations (escaped: a title with `\n::error::` stays one line), Markdown job summary (escaped cells). `--sarif FILE` on every scanning command.
+- `git shield ci` (`crates/git-shield/src/ci.rs`): see the event table in ADR 0008. `GitRepo::file_at` reads the accept file from the trusted commit. `shield_github::set_api_base` takes `$GITHUB_API_URL`. `viewer()` returns `None` on 403: Actions tokens have no user, and that used to skip the force-push log.
+- `action.yml` + `.github/workflows/git-shield.yml`.
+  - The first push run scanned `3b9ccb664..e6b7622b2` in 1.8 s, with no notes (activity API fine with an installation token), and uploaded SARIF. Code scanning shows `t9.workflow.added` (Low).
+  - A throwaway draft PR (#1, closed, branch deleted) with a folderOpen task and a fake "Merge pull request #9999" commit: the job failed with exit 2 on `vscode.tasks.folder-open` High and `t11.pr-merge-mismatch` Critical (no PR #9999). Code scanning accepted both results, including the commit-level one at its placeholder path.
+- YARA:
+  - `shield-rules::yara` (feature `yara`; `rules_dir` / `rule_files` / `builtin_with` are ungated);
+  - leaked `&'static Rules` plus a per-thread `Scanner`, re-created when the rule set changes;
+  - detectors loaded once in `main.rs` (`DETECTORS` OnceLock).
+- Benchmarks: `crates/shield-bench` (criterion 0.8.2, `default-features = false`): `scan_range` 11.7 ms on the 20-commit, ~30k-line synthetic delta (target < 300 ms).
+- **Real data (read-only; a scratchpad clone of matador-legacy, deleted afterwards):**
+  - `git shield ci` on a forced-push event `d9d45eff3 → 0a32698f4` BLOCKS from the event alone: `t10.ref-rewritten` High, `t11.rewritten-copy` and `t10.tampered-payload` Critical.
+  - With the API it also gives `t11.pr-merge-mismatch` Critical and names the force-pusher.
+  - That push would have failed the job.
+- Tests: 153 (default) / 148 (`--no-default-features`).

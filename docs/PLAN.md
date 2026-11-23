@@ -209,4 +209,9 @@ Each phase ends with: green `cargo test` + `cargo clippy -D warnings`, the PROGR
   - signature and PR checks on `clone` and `checkout`.
 
   See the ADR 0007 addendum.
-
+- **2026-11-23:** Session 8 completed Phase 6. Changes to the plan:
+  - `--ci` became a subcommand, `git shield ci`, which reads the range from the GitHub event. A forced push is treated as a rewrite.
+  - Accept files are allowed in CI, but only from the trusted side of the event (ADR 0008).
+  - SARIF is written by hand, with no serde-sarif dependency.
+  - yara-x sits behind a default-on cargo feature (ADR 0009); the Action builds without it.
+  - Benchmarks run on a synthetic delta plus a real-repository script instead of linux in CI.
