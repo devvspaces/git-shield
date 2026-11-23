@@ -1,0 +1,105 @@
+name: git-shield
+description: >-
+  Check every push and pull request for repository-tampering attacks: forged
+  "Merge pull request" commits, force-pushed rewrites, and payloads that run
+  when the repository is opened (editor tasks, agent hooks, lifecycle scripts).
+author: Ayanwola Ayomide
+branding:
+  icon: shield
+  color: red
+
+inputs:
+  fail-on:
+    description: Lowest severity that fails the job (info, low, medium, high, critical).
+    default: high
+  sarif:
+    description: Upload the results to GitHub code scanning (needs `security-events write`).
+    default: "true"
+  sarif-file:
+    description: Where to write the SARIF log.
+    default: git-shield.sarif
+  accepts-path:
+    description: >-
+      Path of an accept file (`[[accept]] id = "…" reason = "…"`) in the
+      repository. It is read from the trusted side of the event (the PR base,
+      or the branch before the push), never from the incoming commits.
+    default: ""
+  github:
+    description: Ask the GitHub API about force-pushes, pushers, signatures and pull requests.
+    default: "true"
+  token:
+    description: Token for the GitHub API and for fetching a force-pushed-away commit.
+    default: ${{ github.token }}
+  args:
+    description: Extra arguments for `git shield ci` (e.g. `--deep`).
+    default: ""
+
+outputs:
+  sarif-file:
+    description: Path of the SARIF log.
+    value: ${{ inputs.sarif-file }}
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable, 2026-10-16
+      with:
+        toolchain: stable
+
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        workspaces: ${{ github.action_path }}
+        shared-key: git-shield-action
+
+    # Built from the action's own source, never from the repository being scanned.
+    - name: Build git-shield
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: cargo build --release --locked -p git-shield
+
+    # A forced push leaves the old tip out of the checkout. Fetch it by SHA so
+    # the rewrite can be compared (GitHub keeps such objects for a while).
+    - name: Fetch the replaced tip
+      if: github.event_name == 'push'
+      shell: bash
+      env:
+        BEFORE: ${{ github.event.before }}
+        TOKEN: ${{ inputs.token }}
+      run: |
+        if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then exit 0; fi
+        if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then exit 0; fi
+        auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+        echo "::add-mask::$auth"
+        git -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+            -c "http.$GITHUB_SERVER_URL/.extraheader=AUTHORIZATION: basic $auth" \
+            fetch --no-tags --no-recurse-submodules --no-write-fetch-head origin "$BEFORE" \
+          || echo "::notice title=git-shield::could not fetch the replaced tip $BEFORE; the GitHub force-push log is still checked"
+
+    - name: Scan
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        GS_BIN: ${{ github.action_path }}/target/release/git-shield
+        GS_FAIL_ON: ${{ inputs.fail-on }}
+        GS_SARIF: ${{ inputs.sarif-file }}
+        GS_ACCEPTS: ${{ inputs.accepts-path }}
+        GS_GITHUB: ${{ inputs.github }}
+        GS_ARGS: ${{ inputs.args }}
+      run: |
+        args=(ci --fail-on "$GS_FAIL_ON" --sarif "$GS_SARIF")
+        if [ -n "$GS_ACCEPTS" ]; then args+=(--accepts-path "$GS_ACCEPTS"); fi
+        if [ "$GS_GITHUB" != "true" ]; then args+=(--no-github); fi
+        # Word-split on purpose: extra flags, no shell evaluation.
+        read -r -a extra <<< "$GS_ARGS"
+        "$GS_BIN" "${args[@]}" "${extra[@]}"
+
+    # Runs even when the scan blocked. Skipped for pull requests from forks,
+    # whose token cannot write code-scanning results.
+    - name: Upload SARIF
+      if: >-
+        always() && inputs.sarif == 'true' && hashFiles(inputs.sarif-file) != '' &&
+        (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      with:
+        sarif_file: ${{ inputs.sarif-file }}
+        category: git-shield

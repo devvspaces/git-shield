@@ -315,11 +315,16 @@ impl Client {
         }
     }
 
-    /// Login of the token's owner.
-    pub fn viewer(&self) -> Result<String, String> {
-        let (body, _) = self.get(&format!("{}/user", self.base))?;
+    /// Login of the token's owner, or `None` for tokens without a user (an
+    /// Actions `GITHUB_TOKEN` or another app installation token gets 403).
+    pub fn viewer(&self) -> Result<Option<String>, String> {
+        let body = match self.get_status(&format!("{}/user", self.base))? {
+            (200, body, _) => body,
+            (403, _, _) => return Ok(None),
+            (status, body, _) => return Err(http_error(status, &body)),
+        };
         let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
-        v["login"].as_str().map(str::to_string).ok_or_else(|| "GitHub /user has no login".into())
+        v["login"].as_str().map(|s| Some(s.to_string())).ok_or_else(|| "GitHub /user has no login".into())
     }
 
     /// Force-pushes to `branch`, newest first, reading at most `max_pages` pages.

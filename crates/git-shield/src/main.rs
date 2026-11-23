@@ -860,7 +860,7 @@ fn github_tips(
     let mut to_fetch = Vec::new();
     for e in log.events {
         // The user's own force-pushes (e.g. restoring the branch) are deliberate.
-        if e.actor.eq_ignore_ascii_case(&viewer) || since.is_some_and(|s| e.at <= s) {
+        if viewer.as_deref().is_some_and(|v| e.actor.eq_ignore_ascii_case(v)) || since.is_some_and(|s| e.at <= s) {
             continue;
         }
         let (Ok(before), Ok(after)) = (ObjectId::from_hex(e.before.as_bytes()), ObjectId::from_hex(e.after.as_bytes()))

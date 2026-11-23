@@ -112,6 +112,50 @@ allowed_signers = "~/.config/git-shield/acme_signers"   # ties SSH signatures to
 ```
 Exit codes: `0` clean · `1` warnings · `2` blocked · `3` error.
 
+## In CI (GitHub Actions)
+The local commands protect people who run them. The action checks every push and pull request on GitHub, so it also catches a force-push made from any IDE or script:
+```yaml
+# .github/workflows/git-shield.yml
+name: git-shield
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      security-events: write     # code-scanning upload
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: devvspaces/git-shield@master   # pin a commit SHA in real use
+        with:
+          fail-on: high                       # default; medium/low/critical also work
+          accepts-path: .github/git-shield-accept.toml   # optional
+```
+- **What is scanned:** a pull request is scanned as `base..head`; a push as `before..after`.
+  - A forced push is checked as a rewrite of the old tip. The action fetches that tip by SHA when the checkout lacks it.
+  - The branch's push log on GitHub names who pushed, and the PR and signature checks run as in `check`.
+- **What the job shows:** findings appear as annotations, in the job summary, and, via SARIF, in the repository's code-scanning alerts.
+- **When it fails:** the job fails only on findings at or above `fail-on` that were not accepted.
+- **Accept files:** an accept file lists reviewed ids:
+  ```toml
+  [[accept]]
+  id = "GS-T9-1a2b3c4d"
+  reason = "our installer step, reviewed 2026-11"
+  ```
+  It is read from the PR base or from the branch before the push, never from the commits being scanned. So a pull request cannot accept its own findings.
+- **Safe on untrusted pull requests:** git-shield never runs the repository's code. It is built from the action's own source, so the `pull_request` trigger is safe even for forks. Prefer `pull_request` over `pull_request_target`.
+
+Outside Actions, `git shield ci --event FILE --event-name push` works with any saved payload. `--sarif FILE` is available on every scanning command.
+
 ## How it stays safe
 - All reading goes through [gitoxide](https://github.com/GitoxideLabs/gitoxide) in-process: no hooks, no fsmonitor, no filters, no pager.
 - `git fetch` runs with those execution points disabled, and only after the local config passes an audit.

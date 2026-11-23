@@ -1320,3 +1320,20 @@ fn ci_accepts_only_from_the_trusted_side() {
     assert_eq!(r.code, 2, "{}\n{}", r.stdout, r.stderr);
     assert!(r.stderr.contains("no .git-shield-accept.toml at"), "{}", r.stderr);
 }
+
+#[test]
+fn ci_reads_the_force_push_log_with_an_installation_token() {
+    // An ordinary-looking push event (not forced, no reflog): only GitHub's
+    // activity log shows that dev was rewritten. Actions tokens get 403 on /user.
+    let (f, real, forged) = incident_without_local_memory();
+    let (base, tip, _, _) = incident_range(&f);
+    let gh = fx::fake_github(vec![
+        ("/user".into(), 403, r#"{"message":"Resource not accessible by integration"}"#.into()),
+        activity(&[fx::force_push_json(&real, &forged, "mallory", "2026-08-01T10:00:00Z")]),
+    ]);
+    let r = ci_run(&f, Some(&gh), "push", &push_event(&base, &tip, false), &[]);
+    assert_eq!(r.code, 2, "{}\n{}", r.stdout, r.stderr);
+    let rules = sarif_rules(&r.sarif);
+    assert!(rules.contains(&"t10.ref-rewritten".to_string()), "{rules:?}\n{}", r.stderr);
+    assert!(r.stdout.contains("@mallory"), "{}", r.stdout);
+}
