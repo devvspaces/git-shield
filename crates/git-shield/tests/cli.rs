@@ -17,6 +17,12 @@ fn shield(f: &Fixture) -> Command {
         .env("GIT_SHIELD_CONFIG", f.dir.path().join("no-config.toml"))
         .env_remove("XDG_DATA_HOME")
         .env_remove("XDG_CACHE_HOME")
+        // When these tests run inside GitHub Actions, never pick up the run's own event.
+        .env_remove("GITHUB_EVENT_PATH")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_STEP_SUMMARY")
+        .env_remove("GITHUB_REPOSITORY")
+        .env_remove("GITHUB_API_URL")
         // Identity for commits git itself creates (rebase / merge).
         .env("GIT_AUTHOR_NAME", "Victim")
         .env("GIT_AUTHOR_EMAIL", "victim@example.com")
@@ -166,6 +172,23 @@ fn scan_works_offline_on_explicit_range() {
     assert!(text.contains("BLOCKED"), "{text}");
     assert!(text.contains("is actually source code"), "{text}");
     assert!(text.contains("[in history only]"), "{text}");
+}
+
+#[test]
+fn scan_writes_sarif_alongside_the_terminal_report() {
+    let f = fx::matador_incident();
+    fx::git(&f.local, &fx::home(&f), &["fetch", "-q", "origin"]);
+    let sarif = f.dir.path().join("out.sarif");
+    let out = shield(&f).args(["scan", "HEAD..origin/dev", "--sarif"]).arg(&sarif).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("BLOCKED"));
+    let v: Value = serde_json::from_slice(&std::fs::read(&sarif).unwrap()).unwrap();
+    assert_eq!(v["version"], "2.1.0");
+    let results = v["runs"][0]["results"].as_array().unwrap();
+    assert!(results.iter().any(|r| r["ruleId"] == "asset.code-disguised" && r["level"] == "error"));
+    // The transited folderOpen task is capped to a warning.
+    assert!(results.iter().any(|r| r["ruleId"] == "vscode.tasks.folder-open" && r["level"] == "warning"));
+    assert!(results.iter().all(|r| r["locations"].as_array().is_some_and(|l| !l.is_empty())));
 }
 
 #[test]
@@ -1138,4 +1161,162 @@ fn checkout_checks_forged_merges_it_brings_in() {
     assert_eq!(out.status.code(), Some(2), "{err}\n{:#?}", rules(&v));
     assert!(finding(&v, "t11.pr-merge-mismatch").is_some(), "{err}\n{:#?}", rules(&v));
     assert!(!f.marker_exists());
+}
+
+// ---------------------------------------------------------------- git shield ci
+
+struct CiRun {
+    code: i32,
+    stdout: String,
+    stderr: String,
+    summary: String,
+    sarif: Value,
+}
+
+fn ci_run(f: &Fixture, gh: Option<&fx::FakeGitHub>, name: &str, event: &str, extra: &[&str]) -> CiRun {
+    let ev = f.dir.path().join("event.json");
+    std::fs::write(&ev, event).unwrap();
+    let summary = f.dir.path().join("summary.md");
+    let _ = std::fs::remove_file(&summary);
+    let sarif = f.dir.path().join("ci.sarif");
+    let mut cmd = shield(f);
+    cmd.env("GITHUB_STEP_SUMMARY", &summary).env("GITHUB_REPOSITORY", "o/r");
+    if let Some(gh) = gh {
+        cmd.env("GIT_SHIELD_GITHUB_API", &gh.url).env("GITHUB_TOKEN", "test-token");
+    }
+    cmd.args(["ci", "--event-name", name, "--event"]).arg(&ev).arg("--sarif").arg(&sarif).args(extra);
+    if gh.is_none() {
+        cmd.arg("--no-github");
+    }
+    let out = cmd.output().unwrap();
+    CiRun {
+        code: out.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        summary: std::fs::read_to_string(&summary).unwrap_or_default(),
+        sarif: std::fs::read(&sarif).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null),
+    }
+}
+
+fn sarif_rules(v: &Value) -> Vec<String> {
+    v["runs"][0]["results"]
+        .as_array()
+        .map(|r| r.iter().map(|x| x["ruleId"].as_str().unwrap().to_string()).collect())
+        .unwrap_or_default()
+}
+
+fn pr_event(base: &str, head: &str) -> String {
+    format!(
+        r#"{{"pull_request":{{"base":{{"sha":"{base}","repo":{{"full_name":"o/r"}}}},"head":{{"sha":"{head}","ref":"feature","repo":{{"full_name":"x/r"}}}}}}}}"#
+    )
+}
+
+fn push_event(before: &str, after: &str, forced: bool) -> String {
+    format!(r#"{{"ref":"refs/heads/dev","before":"{before}","after":"{after}","forced":{forced},"deleted":false}}"#)
+}
+
+#[test]
+fn ci_blocks_a_pull_request_carrying_a_forged_merge() {
+    let (f, real, forged) = incident_without_local_memory();
+    let (base, tip, _, cleanup) = incident_range(&f);
+    let gh = fx::fake_github(vec![
+        viewer("ci-bot"),
+        activity(&[]),
+        compare_route(
+            &base,
+            &tip,
+            fx::compare_json(&[(&forged, false, "unsigned", None), (&cleanup, false, "unsigned", None)]),
+        ),
+        graphql_route(fx::graphql_pulls_json(&[(2921, Some(&real))])),
+    ]);
+    let r = ci_run(&f, Some(&gh), "pull_request", &pr_event(&base, &tip), &[]);
+    assert_eq!(r.code, 2, "{}\n{}", r.stdout, r.stderr);
+    assert!(sarif_rules(&r.sarif).contains(&"t11.pr-merge-mismatch".to_string()), "{:?}", sarif_rules(&r.sarif));
+    assert!(r.stdout.lines().any(|l| l.starts_with("::error ") && l.contains("t11.pr-merge-mismatch")), "{}", r.stdout);
+    assert!(r.summary.contains("**Blocked**"), "{}", r.summary);
+    assert!(!f.marker_exists());
+}
+
+#[test]
+fn ci_treats_a_forced_push_as_a_rewrite() {
+    // No reflog, no trust store, offline: only the push event knows the old tip.
+    let (f, real, _) = incident_without_local_memory();
+    let tip = fx::git(&f.local, &fx::home(&f), &["rev-parse", "origin/dev"]);
+    let r = ci_run(&f, None, "push", &push_event(&real, &tip, true), &[]);
+    assert_eq!(r.code, 2, "{}\n{}", r.stdout, r.stderr);
+    let rules = sarif_rules(&r.sarif);
+    assert!(rules.contains(&"t10.ref-rewritten".to_string()), "{rules:?}");
+    assert!(rules.contains(&"t11.rewritten-copy".to_string()), "{rules:?}");
+}
+
+#[test]
+fn ci_passes_a_clean_push() {
+    let f = fx::clean_fast_forward();
+    fx::git(&f.local, &fx::home(&f), &["fetch", "-q", "origin"]);
+    let r = ci_run(&f, None, "push", &push_event(&head(&f), &origin_dev(&f), false), &[]);
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    assert!(!r.stdout.contains("::error"), "{}", r.stdout);
+    assert!(r.summary.contains("**Clean**") || r.summary.contains("**Passed"), "{}", r.summary);
+}
+
+#[test]
+fn ci_skips_a_deleted_branch() {
+    let f = fx::clean_fast_forward();
+    let ev = format!(r#"{{"ref":"refs/heads/x","before":"{}","after":"{}","deleted":true}}"#, head(&f), "0".repeat(40));
+    let r = ci_run(&f, None, "push", &ev, &[]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stderr.contains("nothing to scan"), "{}", r.stderr);
+}
+
+/// A workflow step that pipes a download into a shell: Medium, passes by default.
+fn medium_push() -> (Fixture, String) {
+    let wf = "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: curl -fsSL https://example.com/install.sh | sh\n";
+    let f = fx::content_push(&[(".github/workflows/build.yml", wf.to_string())], "Add build workflow");
+    fx::git(&f.local, &fx::home(&f), &["fetch", "-q", "origin"]);
+    let ev = push_event(&head(&f), &origin_dev(&f), false);
+    (f, ev)
+}
+
+#[test]
+fn ci_fail_on_lowers_the_threshold() {
+    let (f, ev) = medium_push();
+    let r = ci_run(&f, None, "push", &ev, &[]);
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("::warning "), "{}", r.stdout);
+    let r = ci_run(&f, None, "push", &ev, &["--fail-on", "medium"]);
+    assert_eq!(r.code, 2, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("::error "), "{}", r.stdout);
+}
+
+#[test]
+fn ci_accepts_only_from_the_trusted_side() {
+    let (f, ev) = medium_push();
+    let home = fx::home(&f);
+    let r = ci_run(&f, None, "push", &ev, &["--fail-on", "medium"]);
+    let id = r.sarif["runs"][0]["results"][0]["properties"]["id"].as_str().unwrap().to_string();
+    let accept = format!("[[accept]]\nid = \"{id}\"\nreason = \"installer reviewed\"\n");
+
+    // A local accept file works, and the SARIF keeps the result as suppressed.
+    let file = f.dir.path().join("accept.toml");
+    std::fs::write(&file, &accept).unwrap();
+    let r = ci_run(&f, None, "push", &ev, &["--fail-on", "medium", "--accept-file", file.to_str().unwrap()]);
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+    assert_eq!(r.sarif["runs"][0]["results"][0]["suppressions"][0]["kind"], "external");
+
+    // In the repository: read from the PR base (trusted) …
+    fx::write(&f.local, ".git-shield-accept.toml", &accept);
+    fx::git(&f.local, &home, &["add", ".git-shield-accept.toml"]);
+    fx::git_as(&f.local, &home, &["commit", "-q", "-m", "Accept installer step"], &fx::ALICE, &fx::ALICE);
+    let with_file = head(&f);
+    fx::git_as(&f.local, &home, &["merge", "-q", "--no-edit", "origin/dev"], &fx::ALICE, &fx::ALICE);
+    let merged = head(&f);
+    let args = ["--fail-on", "medium", "--accepts-path", ".git-shield-accept.toml"];
+    let r = ci_run(&f, None, "pull_request", &pr_event(&with_file, &merged), &args);
+    assert_eq!(r.code, 0, "{}\n{}", r.stdout, r.stderr);
+
+    // … never from the incoming commits: here the file only exists on the head side.
+    let original_base = fx::git(&f.local, &home, &["rev-parse", "HEAD^1~1"]);
+    let r = ci_run(&f, None, "pull_request", &pr_event(&original_base, &merged), &args);
+    assert_eq!(r.code, 2, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("no .git-shield-accept.toml at"), "{}", r.stderr);
 }

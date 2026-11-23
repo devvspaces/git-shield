@@ -3,6 +3,7 @@
 //! Installed on PATH as `git-shield`, it is also available as `git shield`.
 
 mod audit;
+mod ci;
 mod config;
 mod doctor;
 mod install;
@@ -50,6 +51,41 @@ enum Command {
         github_branch: Option<String>,
         /// Forensic depth: read far more GitHub history, commits and pull
         /// requests than the defaults used by check/pull.
+        #[arg(long)]
+        deep: bool,
+        #[command(flatten)]
+        common: Common,
+    },
+    /// Scan what a GitHub push or pull request brings in, inside a workflow run.
+    ///
+    /// The range comes from $GITHUB_EVENT_PATH: `base..head` for a pull request,
+    /// `before..after` for a push (a forced push is checked as a rewrite).
+    /// Writes workflow annotations and the job summary; exits 2 when a finding
+    /// at or above --fail-on is not accepted, else 0.
+    Ci {
+        /// Scan this range instead of the one the event implies.
+        range: Option<String>,
+        /// Event payload (default: $GITHUB_EVENT_PATH).
+        #[arg(long, value_name = "FILE")]
+        event: Option<PathBuf>,
+        /// Event name (default: $GITHUB_EVENT_NAME).
+        #[arg(long, value_name = "NAME")]
+        event_name: Option<String>,
+        /// Lowest severity that fails the job.
+        #[arg(long, value_name = "SEVERITY", default_value = "high", value_parser = ci::parse_severity)]
+        fail_on: shield_core::Severity,
+        /// TOML file of `[[accept]] id = "…" reason = "…"` entries.
+        #[arg(long, value_name = "FILE")]
+        accept_file: Option<PathBuf>,
+        /// Same format, read from the repository at the trusted side of the
+        /// event (the PR base, or the branch before the push), never from the
+        /// incoming commits.
+        #[arg(long, value_name = "PATH")]
+        accepts_path: Option<String>,
+        /// Stay offline: no GitHub lookups.
+        #[arg(long)]
+        no_github: bool,
+        /// Forensic depth, as `scan --deep`.
         #[arg(long)]
         deep: bool,
         #[command(flatten)]
@@ -228,6 +264,9 @@ struct Common {
     /// Emit the report as JSON.
     #[arg(long)]
     json: bool,
+    /// Also write the report as SARIF 2.1.0 to FILE (for code scanning).
+    #[arg(long, value_name = "FILE")]
+    sarif: Option<PathBuf>,
     /// Also show info-level findings, and every finding of grouped rules.
     #[arg(long, short)]
     verbose: bool,
@@ -357,6 +396,19 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Pull { target, rebase, merge, reason, common, .. } => pull(target, rebase, merge, reason, common),
         Command::Trust { action } => trust(action),
         Command::Audit { path, rev, common } => audit::run(path, rev, &common),
+        Command::Ci { range, event, event_name, fail_on, accept_file, accepts_path, no_github, deep, common } => {
+            ci::run(ci::CiArgs {
+                range,
+                event,
+                event_name,
+                fail_on,
+                accept_file,
+                accepts_path,
+                no_github,
+                deep,
+                common,
+            })
+        }
         Command::Doctor { json } => doctor::run(json),
         Command::Install { shell, rc, write } => install::install(shell.as_deref(), rc, write),
         Command::Uninstall { shell, rc } => install::uninstall(shell.as_deref(), rc),
@@ -1345,6 +1397,13 @@ fn emit(report: &Report, accepted: &HashSet<String>, common: &Common) -> u8 {
         println!("{}", shield_report::json(report, accepted));
     } else {
         print!("{}", shield_report::terminal(report, accepted, color(common), common.verbose));
+    }
+    if let Some(p) = &common.sarif {
+        let text = shield_report::sarif(report, accepted, env!("CARGO_PKG_VERSION"));
+        if let Err(e) = std::fs::write(p, text) {
+            eprintln!("git-shield: error: writing {}: {e}", p.display());
+            return 3;
+        }
     }
     report.exit_code(accepted) as u8
 }

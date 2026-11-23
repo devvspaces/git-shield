@@ -246,6 +246,16 @@ impl GitRepo {
         })
     }
 
+    /// Contents of `path` (a blob, at most 1 MiB) in commit `id`, or `None`.
+    pub fn file_at(&self, id: ObjectId, path: &str) -> Result<Option<Vec<u8>>> {
+        let Some(oid) = self.tree_entry_oid(self.commit_tree(id)?, path)? else { return Ok(None) };
+        let Ok(blob) = self.repo.find_blob(oid) else { return Ok(None) };
+        if blob.data.len() > 1024 * 1024 {
+            return Ok(None);
+        }
+        Ok(Some(blob.data.clone()))
+    }
+
     fn commit_tree(&self, id: ObjectId) -> Result<ObjectId> {
         let commit = self.repo.find_commit(id).map_err(git_err)?;
         Ok(commit.tree_id().map_err(git_err)?.detach())

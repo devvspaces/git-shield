@@ -138,12 +138,26 @@ struct Actor {
     login: String,
 }
 
+static API_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Use `url` as the API base for clients built afterwards, unless
+/// `GIT_SHIELD_GITHUB_API` is set (`git shield ci` passes `$GITHUB_API_URL`,
+/// so GitHub Enterprise Server works inside Actions). The token is only ever
+/// sent to this one base.
+pub fn set_api_base(url: &str) {
+    let url = url.trim().trim_end_matches('/');
+    if url.starts_with("https://") {
+        let _ = API_OVERRIDE.set(url.to_string());
+    }
+}
+
 impl Client {
     /// Build a client from the environment: `GITHUB_TOKEN` / `GH_TOKEN`, else `gh auth token`.
     pub fn from_env() -> Result<Self, String> {
         let base = std::env::var("GIT_SHIELD_GITHUB_API")
             .ok()
             .filter(|s| !s.is_empty())
+            .or_else(|| API_OVERRIDE.get().cloned())
             .unwrap_or_else(|| DEFAULT_API.into())
             .trim_end_matches('/')
             .to_string();

@@ -1,4 +1,8 @@
-//! Rendering of scan reports: human terminal output and JSON.
+//! Rendering of scan reports: human terminal output, JSON, and CI formats
+//! (SARIF, GitHub annotations, job summary).
+
+pub mod ci;
+pub use ci::{github_annotations, sarif, step_summary};
 
 use owo_colors::{OwoColorize, Style};
 use shield_core::{Finding, Report, Severity};

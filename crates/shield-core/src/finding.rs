@@ -65,6 +65,8 @@ pub enum Threat {
     T13,
     /// Sensitive path touched (no specific detector fired).
     Path,
+    /// A user-supplied content rule (YARA) without a `threat` meta.
+    Custom,
 }
 
 impl Threat {
@@ -84,6 +86,28 @@ impl Threat {
             Threat::T12 => "T12",
             Threat::T13 => "T13",
             Threat::Path => "PATH",
+            Threat::Custom => "YR",
+        }
+    }
+
+    /// One-line description, as in `docs/THREATS.md`.
+    pub fn description(self) -> &'static str {
+        match self {
+            Threat::T1 => "Editor tasks that run automatically when a folder is opened",
+            Threat::T2 => "Payload disguised as a binary asset",
+            Threat::T3 => "Editor settings that enable code execution",
+            Threat::T4 => "AI coding-agent configuration (hooks, MCP servers, rules)",
+            Threat::T5 => "Package lifecycle and build scripts",
+            Threat::T6 => "Shell environment auto-loaders",
+            Threat::T7 => "Local git config or hooks that execute commands",
+            Threat::T8 => "Git attribute drivers and submodule changes",
+            Threat::T9 => "CI workflows and devcontainers",
+            Threat::T10 => "History rewrite or force-push",
+            Threat::T11 => "Impersonated, forged or duplicated commits",
+            Threat::T12 => "Whitespace or line-ending noise masking real changes",
+            Threat::T13 => "Obfuscated code",
+            Threat::Path => "Sensitive path changed",
+            Threat::Custom => "User content rule (YARA)",
         }
     }
 }
