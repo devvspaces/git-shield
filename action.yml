@@ -51,11 +51,13 @@ runs:
         workspaces: ${{ github.action_path }}
         shared-key: git-shield-action
 
-    # Built from the action's own source, never from the repository being scanned.
+    # Built from the action's own source, never from the repository being
+    # scanned. Without YARA: user rules live in a user's config directory,
+    # which a runner does not have, and yara-x adds minutes to a cold build.
     - name: Build git-shield
       shell: bash
       working-directory: ${{ github.action_path }}
-      run: cargo build --release --locked -p git-shield
+      run: cargo build --release --locked --no-default-features -p git-shield
 
     # A forced push leaves the old tip out of the checkout. Fetch it by SHA so
     # the rewrite can be compared (GitHub keeps such objects for a while).

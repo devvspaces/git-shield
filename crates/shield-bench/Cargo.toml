@@ -1,0 +1,27 @@
+[package]
+name = "shield-bench"
+description = "Benchmarks for git-shield (not published)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+default = []
+yara = ["shield-rules/yara"]
+
+[dev-dependencies]
+shield-core = { workspace = true }
+shield-git = { workspace = true }
+shield-rules = { workspace = true }
+shield-fixtures = { path = "../shield-fixtures" }
+tempfile = { workspace = true }
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "engine"
+harness = false
+
+[lints]
+workspace = true

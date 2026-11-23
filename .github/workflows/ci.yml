@@ -25,3 +25,18 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+      - run: cargo bench --locked -p shield-bench --features yara --no-run
+
+  # The lean build: no yara-x.
+  lean:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --locked --no-default-features -- -D warnings
+      - run: cargo test --locked --no-default-features
