@@ -292,7 +292,10 @@ pub(crate) fn run(mut a: CiArgs) -> Result<u8> {
         gh.tips.insert(0, (p, TipSource::Given));
     }
     if ref_name.is_none() && !gh.tips.is_empty() {
-        ref_name = Some(t.to.to_string());
+        ref_name = Some(match &t.branch {
+            Some(b) => format!("refs/remotes/origin/{b}"),
+            None => t.to.to_string(),
+        });
     }
     let repo = if gh.fetched { GitRepo::discover(&common.repo)? } else { repo };
     let ctx = build_context(&repo, &store, t.from, t.to, t.label.clone(), ref_name.as_deref(), &gh, common)?;
