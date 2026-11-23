@@ -1551,3 +1551,81 @@ fn offline_scans_reuse_web_flow_verdicts() {
     std::fs::create_dir_all(&empty).unwrap();
     assert_eq!(run(empty.as_os_str()), first);
 }
+
+// ---------------------------------------------------------------- clone --recurse-submodules
+
+/// A superproject (`origin`, branch dev) with one submodule at `libs/lib`.
+fn with_submodule(payload: bool) -> (Fixture, String) {
+    let f = fx::clean_fast_forward();
+    let home = fx::home(&f);
+    let work = f.dir.path().join("lib-work");
+    fx::git(f.dir.path(), &home, &["init", "-q", "-b", "main", work.to_str().unwrap()]);
+    fx::write(&work, "README.md", "# lib\n");
+    if payload {
+        fx::write(&work, "public/fonts/fa-solid-600.ttf", fx::fake_font_payload());
+    }
+    fx::git(&work, &home, &["add", "-A"]);
+    fx::git_as(&work, &home, &["commit", "-q", "-m", "lib"], &fx::EMEKA, &fx::EMEKA);
+    let sub_commit = fx::git(&work, &home, &["rev-parse", "HEAD"]);
+    let lib = f.dir.path().join("lib.git");
+    fx::git(f.dir.path(), &home, &["clone", "-q", "--bare", work.to_str().unwrap(), lib.to_str().unwrap()]);
+    fx::git(
+        &f.pusher,
+        &home,
+        &["-c", "protocol.file.allow=always", "submodule", "add", "-q", lib.to_str().unwrap(), "libs/lib"],
+    );
+    fx::git_as(&f.pusher, &home, &["commit", "-q", "-m", "Add lib submodule"], &fx::EMEKA, &fx::EMEKA);
+    fx::git(&f.pusher, &home, &["push", "-q", "origin", "HEAD:refs/heads/dev"]);
+    (f, sub_commit)
+}
+
+fn clone_recursive(f: &Fixture, dest: &std::path::Path, extra: &[&str]) -> std::process::Output {
+    shield(f)
+        .args(["clone", "--recurse-submodules", "--no-github", "--branch", "dev"])
+        .args(extra)
+        .arg(&f.origin)
+        .arg(dest)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn clone_recurses_into_clean_submodules() {
+    let (f, sub_commit) = with_submodule(false);
+    // A local-path submodule URL is High on its own; accept it as a reviewer would.
+    let probe = clone_recursive(&f, &f.dir.path().join("probe"), &["--json"]);
+    let v: Value = serde_json::from_slice(&probe.stdout).unwrap();
+    let id = finding(&v, "gitmodules.url").expect("url finding")["id"].as_str().unwrap().to_string();
+    let dest = f.dir.path().join("fresh");
+    let out = clone_recursive(&f, &dest, &["--accept", &id]);
+    assert!(matches!(out.status.code(), Some(0 | 1)), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(dest.join("libs/lib/README.md").is_file());
+    assert!(dest.join(".git/modules/libs/lib").is_dir());
+    let status = fx::git(&dest, &fx::home(&f), &["submodule", "status"]);
+    assert!(status.trim_start().starts_with(&sub_commit) && status.contains("libs/lib"), "{status}");
+    let st = fx::git(&dest.join("libs/lib"), &fx::home(&f), &["status", "--porcelain"]);
+    assert!(st.is_empty(), "{st}");
+}
+
+#[test]
+fn a_payload_in_a_submodule_blocks_the_whole_clone() {
+    let (f, _) = with_submodule(true);
+    let dest = f.dir.path().join("fresh");
+    let out = clone_recursive(&f, &dest, &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("libs/lib/public/fonts/fa-solid-600.ttf"), "{text}");
+    // Nothing checked out: only the superproject's .git (with the submodule inside it).
+    let names: Vec<_> = std::fs::read_dir(&dest).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, [std::ffi::OsString::from(".git")]);
+    assert!(!f.marker_exists());
+}
+
+#[test]
+fn clone_without_recursion_points_at_the_flag() {
+    let (f, _) = with_submodule(false);
+    let dest = f.dir.path().join("fresh");
+    let out = shield(&f).args(["clone", "--no-github", "--branch", "dev"]).arg(&f.origin).arg(&dest).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--recurse-submodules"));
+    assert!(!dest.join("libs/lib/README.md").exists());
+}

@@ -13,6 +13,16 @@ pub const BLOB_SCAN_CAP: u64 = 4 * 1024 * 1024;
 /// Blobs larger than this are not read at all (only size/magic via first bytes is lost).
 pub const BLOB_READ_LIMIT: u64 = 64 * 1024 * 1024;
 
+/// A submodule as recorded in a commit (`.gitmodules` plus the gitlink).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Submodule {
+    pub name: String,
+    pub path: String,
+    pub url: String,
+    /// The commit the superproject pins.
+    pub commit: ObjectId,
+}
+
 /// The upstream a local branch tracks.
 #[derive(Debug, Clone)]
 pub struct Upstream {
@@ -263,6 +273,32 @@ impl GitRepo {
             message,
             signed,
         })
+    }
+
+    /// Submodules recorded in commit `id`: each `.gitmodules` entry whose path
+    /// is a gitlink in that commit's tree, with the commit it pins. Entries
+    /// without a gitlink (stale `.gitmodules` lines) are skipped.
+    pub fn submodules(&self, id: ObjectId) -> Result<Vec<Submodule>> {
+        let Some(bytes) = self.file_at(id, ".gitmodules")? else { return Ok(Vec::new()) };
+        let meta = gix::config::file::Metadata::from(gix::config::Source::Local);
+        let file = gix::config::File::from_bytes_no_includes(&bytes, meta, Default::default()).map_err(git_err)?;
+        let tree = self.repo.find_tree(self.commit_tree(id)?).map_err(git_err)?;
+        let mut out = Vec::new();
+        for section in file.sections() {
+            let header = section.header();
+            if !header.name().eq_ignore_ascii_case(b"submodule") {
+                continue;
+            }
+            let Some(name) = header.subsection_name().map(|n| n.to_str_lossy().into_owned()) else { continue };
+            let (Some(path), Some(url)) = (section.value("path"), section.value("url")) else { continue };
+            let path = path.to_str_lossy().trim_end_matches('/').to_string();
+            let Ok(Some(entry)) = tree.lookup_entry_by_path(&path) else { continue };
+            if entry.mode().kind() != EntryKind::Commit {
+                continue;
+            }
+            out.push(Submodule { name, path, url: url.to_str_lossy().into_owned(), commit: entry.object_id() });
+        }
+        Ok(out)
     }
 
     /// Contents of `path` (a blob, at most 1 MiB) in commit `id`, or `None`.

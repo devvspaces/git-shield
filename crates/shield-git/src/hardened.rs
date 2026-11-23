@@ -108,6 +108,20 @@ impl HardenedGit {
         self.run(&args, true).map(|_| ())
     }
 
+    /// `git clone --no-checkout --separate-git-dir <git_dir> -- <url> <work>`:
+    /// the repository lands in `git_dir` (a submodule's `.git/modules/<name>`);
+    /// `work` only gets a `.git` file and can be deleted afterwards.
+    pub fn clone_separate(&self, url: &str, git_dir: &Path, work: &Path) -> Result<()> {
+        let (g, w) = (git_dir.to_string_lossy(), work.to_string_lossy());
+        let args = ["clone", "--no-checkout", "--no-recurse-submodules", "--separate-git-dir", &g, "--", url, &w];
+        self.run(&args, true).map(|_| ())
+    }
+
+    /// `git config <key> <value>` in this repository.
+    pub fn config_set(&self, key: &str, value: &str) -> Result<()> {
+        self.run(&["config", "--local", "--", key, value], false).map(|_| ())
+    }
+
     /// Populate the index and working tree with exactly `target` (a scanned
     /// commit id) on the current branch. Used right after a no-checkout clone.
     pub fn reset_hard(&self, target: &str) -> Result<()> {

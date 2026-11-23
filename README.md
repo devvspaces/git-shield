@@ -74,6 +74,7 @@ git shield check --accept GS-T2-…   # mark a reviewed finding as accepted
 git shield trust list               # what this repo has accepted / last pulled tips
 git shield trust forget GS-T2-…     # un-accept (or --all, or --ref origin/dev)
 git shield clone <url> [dir]        # clone without checkout, scan the whole tree, then check out (or block)
+git shield clone --recurse-submodules <url>   # same for every submodule; nothing is checked out unless all pass
 git shield checkout feature         # scan what switching would write, then switch
 git shield audit [path]             # a repo/folder that arrived as files: scan files + .git/config, run nothing
 git shield doctor                   # check your git / editor / agent settings (read-only)

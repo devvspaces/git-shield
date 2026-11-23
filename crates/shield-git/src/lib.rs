@@ -17,7 +17,7 @@ pub mod trust;
 pub use gix::hash::ObjectId;
 pub use local::read_local_state;
 pub use provenance::{HABIT_WALK, LOST_CAP, ProvenanceInput, REFLOG_WINDOW_SECS};
-pub use repo::{GitRepo, Upstream};
+pub use repo::{GitRepo, Submodule, Upstream};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

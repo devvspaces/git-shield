@@ -159,6 +159,10 @@ enum Command {
         /// Do not ask GitHub about commit signatures and pull requests.
         #[arg(long)]
         no_github: bool,
+        /// Also clone, scan and check out submodules (recursively, 3 levels).
+        /// Nothing is checked out anywhere unless everything passes.
+        #[arg(long)]
+        recurse_submodules: bool,
         #[command(flatten)]
         common: Common,
     },
@@ -423,8 +427,8 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Doctor { json } => doctor::run(json),
         Command::Install { shell, rc, write } => install::install(shell.as_deref(), rc, write),
         Command::Uninstall { shell, rc } => install::uninstall(shell.as_deref(), rc),
-        Command::Clone { url, dir, branch, reason, no_github, common } => {
-            worktree::clone(&url, dir, branch.as_deref(), reason, no_github, &common)
+        Command::Clone { url, dir, branch, reason, no_github, recurse_submodules, common } => {
+            worktree::clone(&url, dir, branch.as_deref(), reason, no_github, recurse_submodules, &common)
         }
         Command::Checkout { target, reason, allow_unsafe_config, no_github, common } => {
             worktree::checkout(&target, reason, allow_unsafe_config, no_github, &common)
