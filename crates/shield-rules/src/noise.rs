@@ -19,6 +19,19 @@ fn changed_lines(old: &str, new: &str, hash: fn(&str) -> u64) -> usize {
     counts.values().map(|v| v.unsigned_abs() as usize).sum()
 }
 
+/// Added plus removed lines of a real line diff over normalized lines (Myers,
+/// like `git diff -w --numstat`). Only run for files already flagged, since a
+/// diff costs far more than the multiset estimate.
+fn exact_changed_lines(old: &str, new: &str) -> usize {
+    let mut input = imara_diff::InternedInput::default();
+    // `lines()`: no phantom empty token after a final newline, which git
+    // does not count either.
+    input.update_before(old.lines().map(no_whitespace));
+    input.update_after(new.lines().map(no_whitespace));
+    let diff = imara_diff::Diff::compute(imara_diff::Algorithm::Myers, &input);
+    (diff.count_additions() + diff.count_removals()) as usize
+}
+
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0100_0000_01b3;
 
@@ -37,6 +50,12 @@ fn normalized(l: &str) -> u64 {
         h = (h ^ 0x20).wrapping_mul(FNV_PRIME);
     }
     h
+}
+
+/// Line with every whitespace character removed: what `git diff -w`
+/// (`--ignore-all-space`) compares.
+fn no_whitespace(l: &str) -> u64 {
+    l.bytes().filter(|b| !b.is_ascii_whitespace()).fold(FNV_OFFSET, |h, b| (h ^ u64::from(b)).wrapping_mul(FNV_PRIME))
 }
 
 fn crlf_ratio(text: &str) -> f64 {
@@ -69,11 +88,12 @@ impl Detector for NoiseMasking {
         if raw_n < MIN_RAW_LINES {
             return;
         }
-        let real_n = changed_lines(&ot, &nt, normalized);
-        // Need at least 80% of the raw diff to be noise.
-        if real_n * 5 > raw_n {
+        // Need at least 80% of the raw diff to be noise (cheap estimate first).
+        if changed_lines(&ot, &nt, normalized) * 5 > raw_n {
             return;
         }
+        // The estimate over-counts moved lines; report the real diff size.
+        let real_n = exact_changed_lines(&ot, &nt);
         let (oc, nc) = (crlf_ratio(&ot), crlf_ratio(&nt));
         let eol = if oc < 0.1 && nc > 0.9 {
             Some("LF → CRLF")
@@ -90,7 +110,7 @@ impl Detector for NoiseMasking {
         };
         let mut f = Finding::new(Threat::T12, "noise.whitespace-masking", sev, title)
             .anchor(format!("{}..{}", old.oid, new.oid))
-            .detail(format!("raw diff ≈ {raw_n} lines, ignoring whitespace ≈ {real_n} lines"));
+            .detail(format!("raw diff ≈ {raw_n} lines, ignoring whitespace {real_n} lines"));
         if let Some(e) = eol {
             f = f.detail(format!("line endings converted {e}"));
         }
@@ -125,7 +145,40 @@ mod tests {
         let new = old.replace("line number 7 =", "line number 7 = evil() ;").replace('\n', "\r\n");
         let f = scan(&NoiseMasking, &modified("a.py", old.as_bytes(), new.as_bytes()));
         assert_eq!(f[0].severity, Severity::Medium);
-        assert!(f[0].details[0].contains("ignoring whitespace ≈ 2"), "{:?}", f[0].details);
+        assert!(f[0].details[0].contains("ignoring whitespace 2 lines"), "{:?}", f[0].details);
+    }
+
+    /// The reported count equals `git diff --no-index -w --ignore-cr-at-eol --numstat`.
+    #[test]
+    fn counts_match_git() {
+        let old = body(300);
+        // A moved block, an edited line and a deleted line, under a CRLF rewrite.
+        let mut lines: Vec<String> = old.lines().map(str::to_string).collect();
+        let moved: Vec<String> = lines.drain(40..60).collect();
+        lines.splice(200..200, moved);
+        lines[10] = "line number 10 = changed(10)".into();
+        lines.remove(250);
+        // `-w` ignores whitespace inside a line too.
+        lines[120] = lines[120].replace(" = ", "=");
+        let new = lines.join("\r\n") + "\r\n";
+        let exact = exact_changed_lines(&old, &new);
+        let dir = std::env::temp_dir().join(format!("gs-noise-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a"), &old).unwrap();
+        std::fs::write(dir.join("b"), &new).unwrap();
+        let out = std::process::Command::new("git")
+            .current_dir(&dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["diff", "--no-index", "--no-ext-diff", "-w", "--ignore-cr-at-eol", "--numstat", "a", "b"])
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout);
+        let mut it = stat.split_whitespace();
+        let git: usize = it.next().unwrap().parse::<usize>().unwrap() + it.next().unwrap().parse::<usize>().unwrap();
+        assert_eq!(exact, git, "{stat}");
+        assert_ne!(changed_lines(&old, &new, normalized), git, "the estimate should differ here");
     }
 
     #[test]

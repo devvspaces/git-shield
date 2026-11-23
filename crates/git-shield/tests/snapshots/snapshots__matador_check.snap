@@ -1,5 +1,6 @@
 ---
 source: crates/git-shield/tests/snapshots.rs
+assertion_line: 45
 expression: "run(&f, &[\"check\"])"
 ---
 exit: 2
@@ -37,7 +38,7 @@ git-shield · HEAD..origin/dev · 3 commits, 8 file versions scanned
 
  MEDIUM    GS-T12-[id]  Line-ending rewrite hides 4 real changed lines
            app/views.py
-           · raw diff ≈ 606 lines, ignoring whitespace ≈ 4 lines
+           · raw diff ≈ 606 lines, ignoring whitespace 4 lines
            · line endings converted LF → CRLF
            · Review the real change with: git diff --ignore-cr-at-eol -w <range> -- <path>
 

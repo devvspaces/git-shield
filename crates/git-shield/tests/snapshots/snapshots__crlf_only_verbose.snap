@@ -1,5 +1,6 @@
 ---
 source: crates/git-shield/tests/snapshots.rs
+assertion_line: 63
 expression: "run(&f, &[\"check\", \"--verbose\"])"
 ---
 exit: 0
@@ -7,7 +8,7 @@ git-shield · HEAD..origin/dev · 1 commit, 1 file version scanned
 
  INFO      GS-T12-[id]  Whitespace / line-ending only change
            app/views.py
-           · raw diff ≈ 606 lines, ignoring whitespace ≈ 0 lines
+           · raw diff ≈ 606 lines, ignoring whitespace 0 lines
            · line endings converted LF → CRLF
 
 CLEAN  (1 info)

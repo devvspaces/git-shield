@@ -16,6 +16,7 @@ toml = { workspace = true }
 yaml-rust2 = { workspace = true }
 aho-corasick = { workspace = true }
 infer = { workspace = true }
+imara-diff = { workspace = true }
 yara-x = { workspace = true, optional = true }
 
 [features]
