@@ -215,3 +215,7 @@ Each phase ends with: green `cargo test` + `cargo clippy -D warnings`, the PROGR
   - SARIF is written by hand, with no serde-sarif dependency.
   - yara-x sits behind a default-on cargo feature (ADR 0009); the Action builds without it.
   - Benchmarks run on a synthetic delta plus a real-repository script instead of linux in CI.
+- **2026-11-23:** Session 9 closed the known gaps listed after Phase 6, without new phases.
+  - `clone --recurse-submodules` was added (ADR 0010).
+  - Config includes are now followed (ADR 0002 addendum).
+  - The remaining items are recorded in PROGRESS as inherent, Phase 7, or future work.
