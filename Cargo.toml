@@ -11,11 +11,11 @@ repository = "https://github.com/devvspaces/git-shield"
 authors = ["Ayanwola Ayomide"]
 
 [workspace.dependencies]
-shield-core = { path = "crates/shield-core" }
-shield-git = { path = "crates/shield-git" }
-shield-rules = { path = "crates/shield-rules" }
-shield-report = { path = "crates/shield-report" }
-shield-github = { path = "crates/shield-github" }
+shield-core = { path = "crates/shield-core", package = "git-shield-core", version = "=0.5.0" }
+shield-git = { path = "crates/shield-git", package = "git-shield-git", version = "=0.5.0" }
+shield-rules = { path = "crates/shield-rules", package = "git-shield-rules", version = "=0.5.0" }
+shield-report = { path = "crates/shield-report", package = "git-shield-report", version = "=0.5.0" }
+shield-github = { path = "crates/shield-github", package = "git-shield-github", version = "=0.5.0" }
 
 anyhow = "1.0.104"
 thiserror = "2.0.21"

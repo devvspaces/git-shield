@@ -1,5 +1,5 @@
 [package]
-name = "shield-github"
+name = "git-shield-github"
 description = "Optional GitHub lookups for git-shield (push history, commit verification, PR merges)"
 version.workspace = true
 edition.workspace = true
@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+readme = "README.md"
+keywords = ["git","github","security"]
+categories = ["development-tools"]
 
 [dependencies]
 ureq = { workspace = true }

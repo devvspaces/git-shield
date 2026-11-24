@@ -1,10 +1,15 @@
 [package]
-name = "shield-git"
+name = "git-shield-git"
 description = "Read-only, execution-free git access for git-shield (gitoxide) plus a hardened git runner"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["git","security","gitoxide"]
+categories = ["development-tools"]
 
 [dependencies]
 shield-core = { workspace = true }

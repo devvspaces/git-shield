@@ -1101,19 +1101,80 @@ dependencies = [
  "assert_cmd",
  "clap",
  "dialoguer",
+ "git-shield-core",
+ "git-shield-git",
+ "git-shield-github",
+ "git-shield-report",
+ "git-shield-rules",
  "insta",
  "predicates",
  "rayon",
  "serde",
  "serde_json",
- "shield-core",
  "shield-fixtures",
- "shield-git",
- "shield-github",
- "shield-report",
- "shield-rules",
  "tempfile",
  "toml",
+]
+
+[[package]]
+name = "git-shield-core"
+version = "0.5.0"
+dependencies = [
+ "hex",
+ "rayon",
+ "serde",
+ "sha2 0.11.1",
+]
+
+[[package]]
+name = "git-shield-git"
+version = "0.5.0"
+dependencies = [
+ "git-shield-core",
+ "gix",
+ "hex",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "git-shield-github"
+version = "0.5.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
+name = "git-shield-report"
+version = "0.5.0"
+dependencies = [
+ "git-shield-core",
+ "owo-colors",
+ "serde_json",
+]
+
+[[package]]
+name = "git-shield-rules"
+version = "0.5.0"
+dependencies = [
+ "aho-corasick",
+ "git-shield-core",
+ "imara-diff",
+ "infer",
+ "jsonc-parser",
+ "regex",
+ "serde",
+ "serde_json",
+ "toml",
+ "yaml-rust2",
+ "yara-x",
 ]
 
 [[package]]
@@ -2851,21 +2912,11 @@ name = "shield-bench"
 version = "0.5.0"
 dependencies = [
  "criterion",
- "shield-core",
+ "git-shield-core",
+ "git-shield-git",
+ "git-shield-rules",
  "shield-fixtures",
- "shield-git",
- "shield-rules",
  "tempfile",
-]
-
-[[package]]
-name = "shield-core"
-version = "0.5.0"
-dependencies = [
- "hex",
- "rayon",
- "serde",
- "sha2 0.11.1",
 ]
 
 [[package]]
@@ -2873,57 +2924,6 @@ name = "shield-fixtures"
 version = "0.5.0"
 dependencies = [
  "tempfile",
-]
-
-[[package]]
-name = "shield-git"
-version = "0.5.0"
-dependencies = [
- "gix",
- "hex",
- "rayon",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "shield-core",
- "tempfile",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "shield-github"
-version = "0.5.0"
-dependencies = [
- "serde",
- "serde_json",
- "tempfile",
- "ureq",
-]
-
-[[package]]
-name = "shield-report"
-version = "0.5.0"
-dependencies = [
- "owo-colors",
- "serde_json",
- "shield-core",
-]
-
-[[package]]
-name = "shield-rules"
-version = "0.5.0"
-dependencies = [
- "aho-corasick",
- "imara-diff",
- "infer",
- "jsonc-parser",
- "regex",
- "serde",
- "serde_json",
- "shield-core",
- "toml",
- "yaml-rust2",
- "yara-x",
 ]
 
 [[package]]

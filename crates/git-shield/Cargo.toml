@@ -5,9 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 readme = "../../README.md"
 keywords = ["git", "security", "supply-chain", "malware", "scanner"]
 categories = ["command-line-utilities", "development-tools"]
+exclude = ["tests/"]
 
 [[bin]]
 name = "git-shield"

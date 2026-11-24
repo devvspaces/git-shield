@@ -1,10 +1,15 @@
 [package]
-name = "shield-core"
+name = "git-shield-core"
 description = "Core types and scan engine for git-shield"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["git","security","supply-chain"]
+categories = ["development-tools"]
 
 [dependencies]
 rayon = { workspace = true }
