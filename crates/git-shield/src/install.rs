@@ -63,6 +63,14 @@ fn home() -> Result<PathBuf> {
 }
 
 pub fn install(shell: Option<&str>, rc: Option<PathBuf>, write: bool) -> Result<u8> {
+    // Native Windows shells (cmd, PowerShell) have no SHELL; guessing zsh
+    // there would write an rc file nothing reads.
+    if cfg!(windows) && shell.is_none() && std::env::var_os("SHELL").is_none() {
+        bail!(
+            "`install` adds a bash/zsh/fish function; run it from Git Bash or WSL, or pass --shell bash|zsh|fish. \
+             Use `git shield pull` directly in PowerShell or cmd."
+        );
+    }
     let (kind, name) = detect(shell);
     let block = snippet(kind);
     let target = rc.unwrap_or(rc_file(&home()?, name));
