@@ -1,0 +1,30 @@
+[workspace]
+members = ["cargo:."]
+
+# Release chain: see docs/adr/0011-release-chain.md and docs/RELEASING.md.
+[dist]
+cargo-dist-version = "0.34.0"
+ci = "github"
+hosting = "github"
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+installers = ["shell", "powershell", "homebrew"]
+tap = "devvspaces/homebrew-tap"
+formula = "git-shield"
+publish-jobs = ["homebrew", "./publish-crates"]
+install-path = "CARGO_HOME"
+install-updater = false
+checksum = "sha256"
+github-attestations = true
+cargo-auditable = true
+pr-run-mode = "plan"
+precise-builds = true
+# release.yml is edited by hand after `dist generate`: actions pinned to
+# commits, and `environment: release` on the publishing jobs. Re-apply both
+# after regenerating (docs/RELEASING.md).
+allow-dirty = ["ci"]
