@@ -362,6 +362,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "ssh-keygen -Y verify on Windows runners reports nothing; verdicts stay Unchecked")]
     fn ssh_signed_commit_good_intact_and_tampered() {
         if Command::new("ssh-keygen").arg("-?").output().is_err() {
             eprintln!("ssh-keygen not installed; skipped");

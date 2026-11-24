@@ -317,7 +317,10 @@ pub fn clone(
         let git_dir = repo.git_dir().to_path_buf();
         // The superproject URL as git resolves relative submodule URLs against it.
         let url = if Path::new(url).exists() {
-            std::fs::canonicalize(url).map(|p| p.display().to_string()).unwrap_or_else(|_| url.to_string())
+            let p = std::fs::canonicalize(url).map(|p| p.display().to_string()).unwrap_or_else(|_| url.to_string());
+            // Windows: drop the `\\?\` verbatim prefix and use `/`, which git
+            // accepts and relative URLs resolve against.
+            if cfg!(windows) { p.trim_start_matches(r"\\?\").replace('\\', "/") } else { p }
         } else {
             url.to_string()
         };
