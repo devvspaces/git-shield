@@ -22,3 +22,5 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: ./
+        with:
+          build-from-source: "true"   # always test this commit

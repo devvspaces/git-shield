@@ -33,6 +33,14 @@ inputs:
   args:
     description: Extra arguments for `git shield ci` (e.g. `--deep`).
     default: ""
+  version:
+    description: >-
+      Release to download (e.g. `0.6.0`). Defaults to the version in the
+      action's own Cargo.toml, so a pinned action commit runs its release.
+    default: ""
+  build-from-source:
+    description: Build git-shield from the action's source instead of downloading the signed release binary.
+    default: "false"
 
 outputs:
   sarif-file:
@@ -42,11 +50,59 @@ outputs:
 runs:
   using: composite
   steps:
-    - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable, 2026-10-16
+    # The release binary for this action's version, verified twice before it
+    # runs: its SHA-256, and a GitHub build attestation proving it was built
+    # by git-shield's release workflow from the matching tag (ADR 0011).
+    # Without a release for that version (an unreleased commit, an unknown
+    # runner), the action builds from its own source instead.
+    - name: Download and verify git-shield
+      id: locate
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        GS_VERSION: ${{ inputs.version }}
+        GS_SOURCE: ${{ inputs.build-from-source }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        repo=devvspaces/git-shield
+        from_source() { echo "mode=source" >> "$GITHUB_OUTPUT"; exit 0; }
+        if [ "$GS_SOURCE" = "true" ]; then from_source; fi
+        version="${GS_VERSION:-$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ACTION_PATH/Cargo.toml" | head -n 1)}"
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64) target=x86_64-unknown-linux-gnu ;;
+          Linux-ARM64) target=aarch64-unknown-linux-gnu ;;
+          macOS-ARM64) target=aarch64-apple-darwin ;;
+          macOS-X64) target=x86_64-apple-darwin ;;
+          *) echo "::notice title=git-shield::no release binary for $RUNNER_OS-$RUNNER_ARCH; building from source"; from_source ;;
+        esac
+        if ! gh release view "v$version" --repo "$repo" > /dev/null 2>&1; then
+          echo "::notice title=git-shield::no release v$version; building from source"
+          from_source
+        fi
+        dir="$RUNNER_TEMP/git-shield-bin"
+        mkdir -p "$dir" && cd "$dir"
+        archive="git-shield-$target.tar.xz"
+        gh release download "v$version" --repo "$repo" --clobber --pattern "$archive" --pattern "$archive.sha256"
+        want=$(cut -d ' ' -f 1 < "$archive.sha256")
+        got=$( (sha256sum "$archive" 2> /dev/null || shasum -a 256 "$archive") | cut -d ' ' -f 1)
+        if [ "$want" != "$got" ]; then
+          echo "::error title=git-shield::checksum mismatch for $archive"
+          exit 1
+        fi
+        gh attestation verify "$archive" --repo "$repo" \
+          --signer-workflow "$repo/.github/workflows/release.yml" \
+          --source-ref "refs/tags/v$version"
+        tar -xJf "$archive"
+        echo "bin=$dir/git-shield-$target/git-shield" >> "$GITHUB_OUTPUT"
+
+    - if: steps.locate.outputs.mode == 'source'
+      uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable, 2026-10-16
       with:
         toolchain: stable
 
-    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+    - if: steps.locate.outputs.mode == 'source'
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         workspaces: ${{ github.action_path }}
         shared-key: git-shield-action
@@ -55,9 +111,13 @@ runs:
     # scanned. Without YARA: user rules live in a user's config directory,
     # which a runner does not have, and yara-x adds minutes to a cold build.
     - name: Build git-shield
+      if: steps.locate.outputs.mode == 'source'
+      id: build
       shell: bash
       working-directory: ${{ github.action_path }}
-      run: cargo build --release --locked --no-default-features -p git-shield
+      run: |
+        cargo build --release --locked --no-default-features -p git-shield
+        echo "bin=$PWD/target/release/git-shield" >> "$GITHUB_OUTPUT"
 
     # A forced push leaves the old tip out of the checkout. Fetch it by SHA so
     # the rewrite can be compared (GitHub keeps such objects for a while).
@@ -81,7 +141,7 @@ runs:
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.token }}
-        GS_BIN: ${{ github.action_path }}/target/release/git-shield
+        GS_BIN: ${{ steps.locate.outputs.bin || steps.build.outputs.bin }}
         GS_FAIL_ON: ${{ inputs.fail-on }}
         GS_SARIF: ${{ inputs.sarif-file }}
         GS_ACCEPTS: ${{ inputs.accepts-path }}
