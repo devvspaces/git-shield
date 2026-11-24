@@ -111,6 +111,9 @@ pub struct LocalRepoState {
     pub config: Vec<ConfigEntry>,
     /// Non-sample files in the hooks directory.
     pub hooks: Vec<HookFile>,
+    /// Set when a `.git` exists but could not be opened (e.g. a config file
+    /// git-shield cannot parse): its settings were not checked.
+    pub unreadable: Option<String>,
 }
 
 /// Everything detectors may look at.

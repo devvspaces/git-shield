@@ -24,7 +24,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      - run: cargo test --locked --no-fail-fast
       - run: cargo bench --locked -p shield-bench --features yara --no-run
 
   # The lean build: no yara-x.

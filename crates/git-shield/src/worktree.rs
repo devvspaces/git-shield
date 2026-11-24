@@ -110,7 +110,7 @@ fn resolve_submodule_url(base: &str, url: &str) -> std::result::Result<String, S
     if scp {
         return Ok(u.to_string());
     }
-    let local = |s: &str| s.starts_with('/') || s.to_ascii_lowercase().starts_with("file://");
+    let local = |s: &str| s.starts_with('/') || s.to_ascii_lowercase().starts_with("file://") || dos_drive_path(s);
     if local(u) {
         // A local path only makes sense when the superproject is local too.
         return if local(base) {
@@ -120,6 +120,13 @@ fn resolve_submodule_url(base: &str, url: &str) -> std::result::Result<String, S
         };
     }
     Err(format!("`{u}` is not an https, ssh, git or relative URL"))
+}
+
+/// `C:\\dir` or `C:/dir`. git treats these as local paths on Windows only
+/// (elsewhere `C:` would be an scp-style host).
+fn dos_drive_path(s: &str) -> bool {
+    let b = s.as_bytes();
+    cfg!(windows) && b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\')
 }
 
 /// `user@host:path` (scp-like ssh), without spaces or a leading `-`.

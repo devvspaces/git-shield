@@ -78,6 +78,23 @@ impl Detector for LocalConfig {
         let Some(local) = &ctx.local else { return };
         let cfg_path = local.config_path.clone().unwrap_or_else(|| ".git/config".into());
 
+        // git may still accept what git-shield's parser rejects, and then act
+        // on settings nobody checked.
+        if let Some(err) = &local.unreadable {
+            out.push(
+                Finding::new(
+                    Threat::T7,
+                    "git.local-config-unreadable",
+                    Severity::High,
+                    "The repository's git config could not be read, so its settings were not checked",
+                )
+                .path(cfg_path.clone())
+                .anchor("unreadable")
+                .detail(crate::util::clip(err, 200))
+                .detail("A config that fails to parse here may still be accepted by git, which would then run whatever it sets. Inspect `.git/config` (and anything it includes) by hand before running git."),
+            );
+        }
+
         for entry in &local.config {
             let key_lower = entry.key.to_ascii_lowercase();
             let Some((_, sev, why)) = RULES.iter().find(|(p, _, _)| matches(p, &key_lower)) else { continue };
@@ -139,6 +156,7 @@ mod tests {
                     .map(|(k, v)| ConfigEntry { key: (*k).into(), value: (*v).into(), source: None })
                     .collect(),
                 hooks: hooks.iter().map(|(n, x)| HookFile { name: (*n).into(), executable: *x, size: 10 }).collect(),
+                unreadable: None,
             }),
             ..Default::default()
         }

@@ -83,6 +83,12 @@ pub fn scan_dir(root: &Path, label: impl Into<String>) -> Result<DiskScan> {
         .collect::<Result<Vec<_>>>()?;
     let local = match GitRepo::discover(root) {
         Ok(repo) => Some(local::read_local_state(&repo)?),
+        // A `.git` that cannot be opened is reported, not silently skipped.
+        Err(e) if root.join(".git").exists() => Some(shield_core::LocalRepoState {
+            config_path: Some(".git/config".into()),
+            unreadable: Some(e.to_string()),
+            ..Default::default()
+        }),
         Err(_) => None,
     };
     let ctx = ScanContext { label: label.into(), changes, local, ..Default::default() };

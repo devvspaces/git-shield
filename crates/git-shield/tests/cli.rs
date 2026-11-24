@@ -5,6 +5,11 @@ use assert_cmd::Command;
 use serde_json::Value;
 use shield_fixtures::{self as fx, Fixture};
 
+/// A path as git config and TOML want it: forward slashes, no escapes.
+fn slash(p: &std::path::Path) -> String {
+    p.display().to_string().replace('\\', "/")
+}
+
 fn shield(f: &Fixture) -> Command {
     let mut cmd = Command::cargo_bin("git-shield").unwrap();
     cmd.current_dir(&f.local)
@@ -201,7 +206,7 @@ fn poisoned_local_config_refuses_to_run_git() {
     // never run a git command that *reads* fsmonitor in this repo afterwards.)
     let cfg = f.local.join(".git/config");
     let mut text = std::fs::read_to_string(&cfg).unwrap();
-    text.push_str(&format!("[core]\n\tfsmonitor = \"touch {}\"\n", f.marker.display()));
+    text.push_str(&format!("[core]\n\tfsmonitor = \"touch {}\"\n", slash(&f.marker)));
     std::fs::write(&cfg, text).unwrap();
 
     let out = shield(&f).args(["check"]).output().unwrap();
@@ -222,7 +227,7 @@ fn add_to_config(f: &Fixture, text: &str) {
 fn settings_in_an_included_config_file_are_checked() {
     let f = fx::clean_fast_forward();
     // `git` would apply this include; the dangerous key lives only in the included file.
-    std::fs::write(f.local.join(".git/extra.cfg"), format!("[core]\n\tsshCommand = touch {}\n", f.marker.display()))
+    std::fs::write(f.local.join(".git/extra.cfg"), format!("[core]\n\tsshCommand = touch {}\n", slash(&f.marker)))
         .unwrap();
     add_to_config(&f, "[include]\n\tpath = extra.cfg\n");
     let out = shield(&f).args(["check"]).output().unwrap();
@@ -241,7 +246,7 @@ fn include_if_cycles_and_fifos_are_handled() {
     std::fs::write(git.join("a.cfg"), "[include]\n\tpath = b.cfg\n").unwrap();
     std::fs::write(
         git.join("b.cfg"),
-        format!("[include]\n\tpath = a.cfg\n[core]\n\tfsmonitor = touch {}\n", f.marker.display()),
+        format!("[include]\n\tpath = a.cfg\n[core]\n\tfsmonitor = touch {}\n", slash(&f.marker)),
     )
     .unwrap();
     add_to_config(&f, "[includeIf \"gitdir:/nowhere/\"]\n\tpath = a.cfg\n");
@@ -271,7 +276,7 @@ fn hardened_fetch_neutralises_fsmonitor_when_overridden() {
     let f = fx::clean_fast_forward();
     let cfg = f.local.join(".git/config");
     let mut text = std::fs::read_to_string(&cfg).unwrap();
-    text.push_str(&format!("[core]\n\tfsmonitor = \"touch {}\"\n", f.marker.display()));
+    text.push_str(&format!("[core]\n\tfsmonitor = \"touch {}\"\n", slash(&f.marker)));
     std::fs::write(&cfg, text).unwrap();
 
     // Even when the user forces past the preflight, the hardened runner must not trigger it.
@@ -435,7 +440,7 @@ fn pull_refuses_checkout_time_config_drivers() {
     let f = fx::clean_fast_forward();
     let cfg = f.local.join(".git/config");
     let mut text = std::fs::read_to_string(&cfg).unwrap();
-    text.push_str(&format!("[filter \"x\"]\n\tsmudge = \"touch {}\"\n", f.marker.display()));
+    text.push_str(&format!("[filter \"x\"]\n\tsmudge = \"touch {}\"\n", slash(&f.marker)));
     std::fs::write(&cfg, text).unwrap();
     // `check` only fetches, so a smudge filter is not a reason to refuse...
     let out = shield(&f).args(["check", "--json"]).output().unwrap();
@@ -754,11 +759,23 @@ fn arrived_as_files() -> Fixture {
     let f = fx::clean_fast_forward();
     let cfg = f.local.join(".git/config");
     let mut text = std::fs::read_to_string(&cfg).unwrap();
-    text.push_str(&format!("[core]\n\tfsmonitor = \"touch {}\"\n", f.marker.display()));
+    text.push_str(&format!("[core]\n\tfsmonitor = \"touch {}\"\n", slash(&f.marker)));
     std::fs::write(&cfg, text).unwrap();
     fx::write(&f.local, ".vscode/tasks.json", fx::tasks_json_payload());
     fx::write(&f.local, "public/fonts/fa-solid-600.ttf", fx::fake_font_payload());
     f
+}
+
+#[test]
+fn audit_blocks_when_the_git_config_cannot_be_read() {
+    let f = fx::clean_fast_forward();
+    // git-shield's parser rejects this; whatever git makes of it was not checked.
+    add_to_config(&f, "[core\n\tfsmonitor = touch x\n");
+    let out = shield(&f).args(["audit", "--json"]).output().unwrap();
+    let v: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+    assert_eq!(out.status.code(), Some(2), "{:#?}", rules(&v));
+    assert!(has(&v, "git.local-config-unreadable", "high", false), "{:#?}", rules(&v));
 }
 
 #[test]
@@ -875,6 +892,7 @@ fn doctor_reports_risky_user_settings_without_changing_them() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "needs a POSIX shell / MSYS gpg and ssh-keygen with Windows paths")]
 fn installed_shell_function_routes_git_pull_through_the_gate() {
     let f = fx::agent_hook();
     let rc = f.dir.path().join("rc.sh");
@@ -1030,6 +1048,7 @@ fn required_signatures_block_unsigned_commits() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "needs a POSIX shell / MSYS gpg and ssh-keygen with Windows paths")]
 fn ssh_signatures_are_verified() {
     let Some(good) = fx::ssh_signed_push(false) else {
         eprintln!("ssh-keygen unavailable; skipped");
@@ -1044,7 +1063,7 @@ fn ssh_signatures_are_verified() {
     std::fs::write(&signers, format!("emeka@example.com {pubkey}")).unwrap();
     let (code, v, err) = with_config(
         &good,
-        &format!("[[signing]]\nrepo = \"**\"\nrequire = true\nallowed_signers = \"{}\"\n", signers.display()),
+        &format!("[[signing]]\nrepo = \"**\"\nrequire = true\nallowed_signers = \"{}\"\n", slash(&signers)),
         &["--no-fetch"],
     );
     assert_eq!(code, 0, "{err}\n{:#?}", rules(&v));
@@ -1480,6 +1499,7 @@ fn builds_without_yara_say_rules_are_unused() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "needs a POSIX shell / MSYS gpg and ssh-keygen with Windows paths")]
 fn offline_scans_reuse_web_flow_verdicts() {
     let have = |p: &str| std::process::Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success());
     if !have("gpgv") || !have("gpg") {
