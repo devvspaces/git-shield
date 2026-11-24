@@ -30,7 +30,7 @@ BLOCKED: 4 finding(s) at high or above  (3 critical, 1 high, 4 medium, 1 low, 2 
 git-shield: pull blocked; nothing was merged.
 ```
 
-> Status: **early development (Phase 3 done)**. `scan`, `check` and the `pull` gate work offline, with an optional GitHub force-push lookup, and cover AI-agent configs, lifecycle scripts, CI and obfuscation; `clone`, `checkout`, `audit`, `doctor` and `install` are in; CI/SARIF and releases are next. See [docs/PROGRESS.md](docs/PROGRESS.md).
+> Status: **Phase 7 in progress (v0.6.0, first binary release)**. `scan`, `check`, `pull`, `clone`, `checkout`, `audit`, `doctor`, `install`, `ci` (GitHub Action with SARIF) and user YARA rules are in. Signed binaries for macOS, Linux and Windows ship from v0.6.0. See [docs/PROGRESS.md](docs/PROGRESS.md).
 
 ## What it detects
 
@@ -50,15 +50,33 @@ git-shield: pull blocked; nothing was merged.
 | Devcontainers / CI | `initializeCommand` (runs on the host), `toJSON(secrets)`, `pull_request_target` checkouts, self-hosted runner backdoors, script injection |
 | Obfuscation | code hidden off-screen after long whitespace, decode-then-execute, huge lines, high-entropy blobs; and which task/hook/script runs them |
 | Known indicators | a small, sourced list of worm artefacts (`crates/shield-rules/data/signatures.toml`) |
-| *Coming* | yara-x rules, SARIF / CI mode, releases |
+| Your own rules | YARA rules in `~/.config/git-shield/rules` ([ADR 0009](docs/adr/0009-user-yara-rules.md)) |
 
 Full list with sources: [docs/THREATS.md](docs/THREATS.md).
 
-## Install (from source)
+## Install
 ```sh
-cargo install --path crates/git-shield
-git shield --help        # git picks up any `git-<name>` binary on PATH
+brew install devvspaces/tap/git-shield                       # macOS / Linux
+cargo install git-shield --locked                            # any platform with Rust
 ```
+Or use the shell / PowerShell installer from the [latest release](https://github.com/devvspaces/git-shield/releases/latest):
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/devvspaces/git-shield/releases/latest/download/git-shield-installer.sh | sh
+```
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/devvspaces/git-shield/releases/latest/download/git-shield-installer.ps1 | iex"
+```
+Then `git shield --help`: git picks up any `git-<name>` binary on PATH.
+
+**Verify a download.** Every release archive has a SHA-256 file and a GitHub build attestation, which proves it was built by this repository's release workflow from the release tag ([ADR 0011](docs/adr/0011-release-chain.md)):
+```sh
+gh release download v0.6.0 --repo devvspaces/git-shield -p 'git-shield-aarch64-apple-darwin.tar.xz*'
+shasum -a 256 -c git-shield-aarch64-apple-darwin.tar.xz.sha256
+gh attestation verify git-shield-aarch64-apple-darwin.tar.xz --repo devvspaces/git-shield
+```
+Release tags are GPG-signed (`git tag -v v0.6.0`). From source: `cargo install --path crates/git-shield`.
+
+On Windows, everything except `install` works. The shell function supports bash, zsh and fish, so use it from Git Bash or WSL. SSH-signature checks currently report "unchecked" on Windows.
 
 ## Usage
 ```sh
@@ -136,7 +154,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: devvspaces/git-shield@master   # pin a commit SHA in real use
+      - uses: devvspaces/git-shield@<release commit SHA>   # e.g. the v0.6.0 tag's commit
         with:
           fail-on: high                       # default; medium/low/critical also work
           accepts-path: .github/git-shield-accept.toml   # optional
@@ -153,7 +171,8 @@ jobs:
   reason = "our installer step, reviewed 2026-11"
   ```
   It is read from the PR base or from the branch before the push, never from the commits being scanned. So a pull request cannot accept its own findings.
-- **Safe on untrusted pull requests:** git-shield never runs the repository's code. It is built from the action's own source, so the `pull_request` trigger is safe even for forks. Prefer `pull_request` over `pull_request_target`.
+- **Which binary runs:** the action downloads the release binary for its own version. It runs it only after the SHA-256 and the build attestation (release workflow, matching tag) both check out. Without a release for that version, it builds from the action's own source. `build-from-source: "true"` forces the source build. Pinned to a release commit, setup takes seconds. `@master` between releases runs the last release.
+- **Safe on untrusted pull requests:** git-shield never runs the repository's code, so the `pull_request` trigger is safe even for forks. Prefer `pull_request` over `pull_request_target`.
 
 Outside Actions, `git shield ci --event FILE --event-name push` works with any saved payload. `--sarif FILE` is available on every scanning command.
 

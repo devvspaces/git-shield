@@ -7,9 +7,9 @@
 
 | | |
 |---|---|
-| **Phase** | 0–6 done (v0.5.0 tagged) → next: Phase 7 (cargo-dist releases, Homebrew, signed artifacts) |
-| **Last completed** | Session 9: closed the known gaps: config includes followed, offline web-flow cache, parallel diff walk and audit, exact T12 counts, installer allowlist, `clone --recurse-submodules` (ADR 0010), tighter interpreter-on-asset check. 167 tests green |
-| **Next task** | Phase 7, when the user asks |
+| **Phase** | 0–6 done; Phase 7 part 1 done (v0.6.0: signed binaries, Homebrew, crates.io, attested action binary) → next: Phase 7 part 2 (docs site, threat matrix, comparison) and v1.0 |
+| **Last completed** | Session 10: crates renamed to `git-shield-*`; Windows CI and fixes (unreadable `.git/config` now a High finding); cargo-dist release pipeline with attestations, approval-gated publishing; action runs the verified release binary (ADR 0011). 168 tests |
+| **Next task** | Phase 7 part 2, when the user asks |
 | **Blockers** | None |
 | **Perf** | Warm, release build, matador-legacy: `scan af20233d8..d9351023d` (20 commits, 58 file versions) **~30 ms**; `scan HEAD..origin/dev` with provenance **~20–90 ms** (target < 300 ms); GitHub lookup adds **~1–2 s** of network; local signature checks ~3 ms per signed commit (parallel), web-flow verdicts cached; forensic `scan --github` of 1,110 commits **cold ~8 s, warm ~4 s** with full coverage; offline `scan HEAD~300..HEAD` (1,113 commits) **1.2 s warm** (was 3.2 s), **0.75 s** with `--no-verify-signatures` (was 1.5 s); `audit` of 3,100 files 0.19 s warm. `shield-bench` (synthetic 20 commits, ~30k lines): `scan_range` **11.2 ms**, delta 6.7 ms (was 10.4), detectors 4.1 ms, with 50 YARA rules 4.2 ms. Release binary 18.3 MB (7.9 MB without `yara`); clean release build 3 min (36 s without) |
 
@@ -72,6 +72,14 @@
 - [x] User YARA rules via yara-x 1.23, feature `yara` on by default; metadata contract; hard error on bad rules; `doctor` status (ADR 0009)
 - [x] `crates/shield-bench` (criterion) + `scripts/bench-real.sh`; CI builds the benches and runs a `--no-default-features` job
 ### Phase 7: cargo-dist releases, Homebrew, signed artifacts (v1.0)
+- [x] Internal crates renamed `git-shield-core/-git/-rules/-report/-github` (`shield-core` was taken); publish metadata; `cargo package --workspace` verifies all six
+- [x] Windows: CI on `windows-latest`, drive-letter submodule paths, `install` refuses to guess a shell; SSH-signature checks stay Unchecked there
+- [x] cargo-dist 0.34 `release.yml`: 5 targets, cargo-auditable, sha256, shell/PowerShell installers, Homebrew formula; pinned actions; `release` environment (approval, secrets) (ADR 0011, docs/RELEASING.md)
+- [x] GitHub build attestations on every artifact; GPG-signed release tags
+- [x] crates.io publishing job (`publish-crates.yml`)
+- [x] Action downloads the release binary and verifies SHA-256 + attestation; source build as fallback
+- [ ] Docs site / threat matrix / comparison with git-moat, flynn, gittuf
+- [ ] v1.0
 
 ## Known gaps / ideas (not yet scheduled)
 - ~~T12 multiset diff is an approximation~~ Session 9: the reported count is a Myers diff with `git diff -w` semantics (imara-diff). It matches git on 114 of 117 real files, and on the rest is within 2–4 lines (git's Myers heuristics). `task.py` says 8, as git does.
@@ -84,7 +92,7 @@
 - ~~GitHub checks cover 300 commits / 100 PRs~~ Session 7: GraphQL batches (100 per request). Defaults: 2000 signed commits, 1000 PRs; `--deep`: 5000 each. REST fallback (100) when GraphQL is unavailable.
 - ~~`clone`/`checkout` do not verify signatures~~ Session 7: they run the signature and PR rules over the history they bring in (clone: newest 50,000 commits; `require` is not applied to existing history).
 - ~~Offline scans don't cache local signature verdicts~~ Session 9: per-repository cache `git-shield/local/<hash>.json`. Every final gpgv verdict against the bundled keyring is cached (good, bad, no key, expired, revoked).
-- The action builds git-shield from source (~1 min cold, cached later). Phase 7 ships binaries. It builds without YARA: a runner has no user rules directory.
+- ~~The action builds git-shield from source~~ Session 10: it runs the attested release binary for its version (with YARA, though a runner has no rules), and builds from source only without a release.
 - Commit-level findings use the placeholder path `.git-shield/commits/<sha>` in SARIF. This is inherent: code scanning requires a physical location (verified on a live upload).
 - Warm forensic scans with `--github` spend most of their time on the network: the activity log, and open or unknown PR states, which can change and so are not cached. The offline part is now ~0.75 s for 1,110 commits (was 1.3 s).
 - The matador-legacy real-data run found five more forged "Merge pull request" commits still in `dev`. Details went to the user only; nothing was changed in that repo.
@@ -296,3 +304,20 @@
   - `audit` 0.19 s;
   - unchanged results: `HEAD..origin/dev` clean, incident replay blocks, `af20233d8..d9351023d` warns.
 - Tests: 167.
+
+### 2026-11-24: Session 10 (Phase 7 part 1: signed releases)
+- **Crates:** the internal crates are now `git-shield-core`, `-git`, `-rules`, `-report` and `-github`, and the Rust paths are unchanged (package aliases). Path deps pin `=0.6.0`. Each crate has a README and metadata. `cargo package --workspace` verifies all six.
+- **Windows** (first time on CI; 11 failures at first, now green):
+  - tests write paths into git config and TOML with `/`;
+  - a local `C:\…` submodule URL counts as local on Windows, and the superproject path loses its `\\?\` prefix;
+  - `install` refuses to guess a shell on native Windows;
+  - three tests that need a POSIX shell or MSYS gpg, plus the ssh-keygen verify test, are ignored on Windows.
+  - CI tests with `--no-fail-fast`.
+- **Found on the way:** `audit` silently skipped a `.git` it could not open (e.g. a config gix cannot parse), and so never checked its settings. Now that is `git.local-config-unreadable` (High). Tested.
+- **Release pipeline** (ADR 0011, docs/RELEASING.md):
+  - dist 0.34.0 and `dist-workspace.toml`: 5 targets, `cargo-auditable`, attestations, sha256, three installers and the Homebrew tap;
+  - `release.yml` hand-edited: commit-pinned actions, read-only default permissions, and `environment: release` on the host and tap jobs and on `publish-crates.yml`;
+  - the `release` environment (maintainer approval, `v*` tags only) and the public `devvspaces/homebrew-tap` repo were created.
+- **Action:** a `version` input (defaults to the action's Cargo.toml version) and a `build-from-source` input. It downloads the release archive, checks its SHA-256, then runs `gh attestation verify` with the signer workflow and the tag. It builds from source only when there is no release; the dogfood workflow always builds from source.
+- Local `dist build` for aarch64-apple-darwin: an 18.4 MB binary in `git-shield-aarch64-apple-darwin/`; `HEAD..origin/dev` on matador-legacy exits 0.
+- Tests: 168 (4 of them ignored on Windows).

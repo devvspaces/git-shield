@@ -219,3 +219,7 @@ Each phase ends with: green `cargo test` + `cargo clippy -D warnings`, the PROGR
   - `clone --recurse-submodules` was added (ADR 0010).
   - Config includes are now followed (ADR 0002 addendum).
   - The remaining items are recorded in PROGRESS as inherent, Phase 7, or future work.
+- **2026-11-24:** Session 10 started Phase 7 with v0.6.0, the first binary release; v1.0 is kept for after the docs and comparison work.
+  - Signed binaries ship for macOS, Linux and Windows, with Homebrew and crates.io.
+  - The internal crates were renamed `git-shield-*` for crates.io.
+  - The release chain is in ADR 0011: build attestations instead of a signing key, and an approval-gated `release` environment. The action runs the verified release binary.
